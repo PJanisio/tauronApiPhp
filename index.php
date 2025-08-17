@@ -1,6 +1,18 @@
 <?php
 
+/**
+ * tauronApiPhp
+ * Author: Paweł 'Pavlus' Janisio
+ * Website: https://github.com/PJanisio/tauronApiPhp
+ * Receive jSON data from Tauron e-licznik (polish energy distributor)
+ * 
+ * 
+ */
+
 declare(strict_types=1);
+error_reporting(E_ALL);
+ini_set('display_errors', '0');
+mb_internal_encoding('UTF-8');
 
 /**
  * eLicznik bridge (login -> select meter -> fetch).
@@ -8,12 +20,8 @@ declare(strict_types=1);
  *   user, pass, meter, from, to,
  *   type=consumption|generation,
  *   balanced=0|1 (only used when type is consumption|generation)
- *   format=json, debug=0|1, raw=0|1
+ *   format=json, debug=0|1, raw=0|1, save=0|1
  */
-
-error_reporting(E_ALL);
-ini_set('display_errors', '0');
-mb_internal_encoding('UTF-8');
 
 const URL_LOGIN      = 'https://logowanie.tauron-dystrybucja.pl/login';
 const URL_SERVICE    = 'https://elicznik.tauron-dystrybucja.pl';
@@ -260,8 +268,6 @@ function synth_balanced(?array $primary, ?array $other, string $mode): array
         $p = $rowsP[$k]['EC'] ?? 0.0;
         $o = $rowsO[$k]['EC'] ?? 0.0;
         $net = ($mode === 'consumption') ? max($p - $o, 0.0) : max($p - $o, 0.0); // same formula; p is chosen accordingly
-        if ($mode === 'generation') { 
-        }
         $base = $rowsP[$k] ?? $rowsO[$k] ?? ['Date' => '', 'Hour' => '', 'Zone' => '1', 'ZoneName' => 'Cała doba', 'Taryfa' => $tariff ?? 'G11'];
         $row  = [
             'EC'      => (string)(0 + $net),
@@ -438,33 +444,59 @@ if ($typeIn === 'balanced') {
 }
 
 /* ------------ output ------------ */
+$save = (q('save', '0') === '1');
+
 if ($result) {
-    if ($rawOut) {
-        header('Content-Type: application/json; charset=utf-8');
-        echo $result['body'];
-        exit;
-    }
-    out_json([
+    // Optional file save in the same directory as index.php
+    $responseData = [
         'status' => 'ok',
-        'where' => 'data',
-        'how' => $result['how'],
-        'input' => [
-            'user' => substr($user, 0, 2) . '***',
-            'meter' => $meter,
-            'type' => $typeIn,
+        'where'  => 'data',
+        'how'    => $result['how'],
+        'input'  => [
+            'user'     => substr($user, 0, 2) . '***',
+            'meter'    => $meter,
+            'type'     => $typeIn,
             'balanced' => $balanced ? 1 : 0,
-            'from' => $fromIso,
-            'to' => $toIso
+            'from'     => $fromIso,
+            'to'       => $toIso,
         ],
         'attempts' => $attempts,
-        'data' => json_decode($result['body'], true),
-    ]);
+        'data'     => json_decode($result['body'], true),
+    ];
+
+    if ($save) {
+        $balTag = $balanced ? 'bal1' : 'bal0';
+        $fname  = sprintf(
+            'tauron_%s_%s_%s_%s_%s.json',
+            $meter,
+            $typeIn,
+            $balTag,
+            str_replace('-', '', $fromIso),
+            str_replace('-', '', $toIso)
+        );
+        $fpath = __DIR__ . DIRECTORY_SEPARATOR . $fname;
+
+        // attempt to save; failure shouldn't block API response
+        file_put_contents($fpath, json_encode($responseData, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        // include filename in response (best-effort)
+        $responseData['saved_file'] = $fname;
+    }
+
+    out_json($responseData);
 }
 
+/* No successful result -> return explicit JSON error */
 out_json([
-    'status' => 'error',
-    'where' => 'fetch',
-    'message' => 'No data returned from any root (login ok, meter selected).',
-    'input' => ['user' => substr($user, 0, 2) . '***', 'meter' => $meter, 'type' => $typeIn, 'balanced' => $balanced ? 1 : 0, 'from' => $fromIso, 'to' => $toIso],
+    'status'   => 'error',
+    'where'    => 'fetch',
+    'message'  => 'No data returned from any root (login ok, meter selected).',
+    'input'    => [
+        'user'     => substr($user, 0, 2) . '***',
+        'meter'    => $meter,
+        'type'     => $typeIn,
+        'balanced' => $balanced ? 1 : 0,
+        'from'     => $fromIso,
+        'to'       => $toIso
+    ],
     'attempts' => $attempts
 ], 502);
