@@ -6,11 +6,12 @@ Skrypt `index.php` loguje się do serwisu **Tauron eLicznik**, wybiera wskazany 
 
 - **PHP**: Testowane na wersji `8.4.8`
 - **cURL**
-- Dostęp do zapisu w katalogu tymczasowym dla sesji (pliki cookie są przechowywane w `$_SESSION`)  
+- Dostęp do zapisu w katalogu, w którym znajduje się `index.php`
 
 ## Obsługa sesji
 
 Skrypt wykorzystuje mechanizm **PHP sessions** (`session_start()`) do przechowywania ciasteczek i tokenów CSRF potrzebnych do utrzymania zalogowanego połączenia.  
+
 - Sesja trwa do momentu jej wygaśnięcia na serwerze Taurona (zwykle kilkanaście minut bezczynności).  
 - Przy każdym wywołaniu skryptu wymagane są dane logowania (`user` i `pass`) — ale sesja minimalizuje liczbę dodatkowych żądań podczas pracy.  
 - Jeśli Tauron zmieni zasady logowania, może być konieczne dostosowanie kodu.
@@ -29,12 +30,13 @@ Skrypt wykorzystuje mechanizm **PHP sessions** (`session_start()`) do przechowyw
 | `format`   | ✖        | `json` (tylko JSON wspierany) |
 | `debug`    | ✖        | `1` = logowanie kroków pośrednich |
 | `raw`      | ✖        | `1` = zwróć czysty JSON z Taurona |
+| `save`     | ✖        | `1` = zapis do json w tym samym katalogu co `index.php` |
 
 ## Przykładowy URL
 
-Pobieranie danych z zakresu 10-15 sierpnia 2025, pobór energi po zbilansowaniu, raport jako json:
+Pobieranie danych z zakresu 10-15 sierpnia 2025, pobór energi po zbilansowaniu, raport jako json oraz zapis do pliku:
 
-`https://twoja_domena.pl/index.php?user=xxx@gxxxcom&pass=xxxxxxxx&meter=590322xxxxxxxxxx&from=2025-08-10&to=2025-08-15&type=consumption&balanced=1&format=json&debug=0`
+`https://twoja_domena.pl/index.php?user=xxx@gxxxcom&pass=xxxxxxxx&meter=590322xxxxxxxxxx&from=2025-08-10&to=2025-08-15&type=consumption&balanced=1&format=json&debug=0&save=1`
 
 ## Wynik
 
