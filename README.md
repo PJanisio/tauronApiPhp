@@ -65,6 +65,16 @@ Pobieranie danych z zakresu 10-15 sierpnia 2025, pobór energi po zbilansowaniu,
 }
 ```
 
+## Zwracane kody HTTP
+
+| Kod | Kiedy | Przykładowe `where` | Uwagi |
+|-----|-------|----------------------|-------|
+| **200 OK** | Sukces – dane pobrane lub zsyntetyzowane | `data` | Pole `data` zawiera strukturę z `success: true`. |
+| **400 Bad Request** | Błąd wejścia: brak wymaganych parametrów, zły format daty, niepoprawny `type` / `balanced` | `inputs` | Przykład: „Invalid date format. Use YYYY-MM-DD or DD.MM.YYYY”. |
+| **500 Internal Server Error** | Awaria kodowania odpowiedzi JSON (rzadkie) | `encode` | W bloku `catch` ustawiany jest kod 500. |
+| **502 Bad Gateway** | Problem po stronie serwisu źródłowego: nieudane logowanie/wybór licznika lub brak danych z endpointów | `login`, `select_meter`, `fetch` | Skrypt korzysta z nieoficjalnych endpointów – ich niedostępność skutkuje 502. |
+
+
 ## Znane ograniczenia
 
 - Brak oficjalnego API – skrypt używa wewnętrznych endpointów serwisu eLicznik, które mogą się zmienić bez zapowiedzi.

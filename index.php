@@ -48,6 +48,8 @@ function out_json($data, int $code = 200)
     try {
         echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
     } catch (Throwable $e) {
+        // throw 500
+        http_response_code(500);
         echo '{"status":"error","where":"encode","message":"JSON encoding failed"}';
     }
     exit;
@@ -206,6 +208,11 @@ function to_json($r)
     return $r ? json_decode($r['body'], true) : null;
 }
 
+/**
+ * merge with self-consumption balancing:
+ *   mode='consumption' -> import = max(cons - gen, 0)
+ *   mode='generation'  -> export = max(gen  - cons, 0)
+ */
 
 function synth_balanced(?array $primary, ?array $other, string $mode): array
 {
