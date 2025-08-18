@@ -4,7 +4,7 @@ Skrypt `index.php` loguje się do serwisu **Tauron eLicznik**, wybiera wskazany 
 
 ## Wymagania
 
-- **PHP**: Testowane na wersji `8.4.8`
+- **PHP**: ≥ `8.1` (testowane na wersji 8.4.8)
 - **cURL**
 - Dostęp do zapisu w katalogu, w którym znajduje się `index.php`
 
@@ -27,45 +27,41 @@ Skrypt wykorzystuje mechanizm **PHP sessions** (`session_start()`) do przechowyw
 | `to`       | ✔        | data końcowa (`YYYY-MM-DD` albo `DD.MM.YYYY`) |
 | `type`     | ✔        | `consumption` (pobór), `generation` (produkcja PV) |
 | `balanced` | ✖        | `0` = dane surowe (domyślnie), `1` = bilansowanie godzinowe (import/eksport netto) |
-| `format`   | ✖        | `json` (tylko JSON wspierany) |
-| `debug`    | ✖        | `1` = logowanie kroków pośrednich |
-| `raw`      | ✖        | `1` = zwróć czysty JSON z Taurona |
 | `save`     | ✖        | `1` = zapis do json w tym samym katalogu co `index.php` |
 
 ## Przykładowy URL
 
 Pobieranie danych z zakresu 10-15 sierpnia 2025, pobór energi po zbilansowaniu, raport jako json oraz zapis do pliku:
 
-`https://twoja_domena.pl/index.php?user=xxx@gxxxcom&pass=xxxxxxxx&meter=590322xxxxxxxxxx&from=2025-08-10&to=2025-08-15&type=consumption&balanced=1&format=json&debug=0&save=1`
+`https://twoja_domena.pl/index.php?user=xxx@gxxxcom&pass=xxxxxxxx&meter=590322xxxxxxxxxx&from=2025-08-10&to=2025-08-15&type=consumption&balanced=1&save=1`
 
 ## Wynik
 
 ```json
 {
-"status": "ok",
-"where": "data",
-"how": "consumption_balanced",
-"input": {
-  "user": "***",
-  "meter": "5903...",
-  "type": "consumption",
-  "balanced": 1,
-  "from": "2025-08-10",
-  "to": "2025-08-15"
-},
-"attempts": [...],
-"data": {
-  "success": true,
+  "status": "ok",
+  "where": "data",
+  "how": "consumption_balanced",
+  "input": {
+    "user": "pa***",
+    "meter": "5903...",
+    "type": "consumption",
+    "balanced": 1,
+    "from": "2025-08-10",
+    "to": "2025-08-15"
+  },
+  "attempts": [ /* metadane prób/źródeł */ ],
   "data": {
-    "allData": [
-      { "Date": "2025-08-10", "Hour": "00", "EC": "0.45", ... },
-      { "Date": "2025-08-10", "Hour": "01", "EC": "0.32", ... }
-    ],
-    "sum": 34.5,
-    "zones": { "1": 34.5 },
-    "tariff": "G11"
+    "success": true,
+    "data": {
+      "allData": [
+        { "Date": "2025-08-10", "Hour": "00", "EC": "0.45", "Zone":"1","ZoneName":"Cała doba","Taryfa":"G11" }
+      ],
+      "sum": 34.5,
+      "zones": { "1": 34.5 },
+      "tariff": "G11"
+    }
   }
-}
 }
 ```
 
