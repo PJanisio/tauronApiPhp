@@ -1,11 +1,9 @@
 <?php
-
 /**
  * tauronApiPhp
  * Author: Paweł 'Pavlus' Janisio
  * Website: https://github.com/PJanisio/tauronApiPhp
  * Receive jSON data from Tauron e-licznik (polish energy distributor)
- * 
  */
 
 declare(strict_types=1);
@@ -74,6 +72,39 @@ function cookie_file(string $user): string
         @file_put_contents($path, '');
     return $path;
 }
+
+// Check if in cookie file there are any Tauron cookies first in cURL memory, then in the file
+function has_service_cookie($ch, string $cookieFile): array
+{
+    $hostRe = '/\belicznik\.tauron-dystrybucja\.pl\b/i';
+    $okMem = false;
+    $memCount = 0;
+    // 1) In-memory cookie jar (niezależne od zapisu do pliku)
+    if (defined('CURLINFO_COOKIELIST')) {
+        $list = @curl_getinfo($ch, CURLINFO_COOKIELIST);
+        if (is_array($list)) {
+            $memCount = count($list);
+            foreach ($list as $line) {
+                if (preg_match($hostRe, (string)$line)) {
+                    $okMem = true;
+                    break;
+                }
+            }
+        }
+    }
+    // Cookie file check
+    $okFile = false;
+    if (!$okMem) {
+        if (is_file($cookieFile) && filesize($cookieFile) > 0) {
+            $txt = @file_get_contents($cookieFile);
+            if ($txt !== false) {
+                $okFile = (bool)preg_match($hostRe, $txt);
+            }
+        }
+    }
+    return ['ok' => ($okMem || $okFile), 'mem_count' => $memCount, 'file_ok' => $okFile];
+}
+
 function ch_init(string $cookieFile)
 {
     $ch = curl_init();
@@ -93,6 +124,7 @@ function ch_init(string $cookieFile)
     ]);
     return $ch;
 }
+
 function req($ch, string $method, string $url, array $opts = []): array
 {
     $headers = $opts['headers'] ?? [];
@@ -134,7 +166,21 @@ function req($ch, string $method, string $url, array $opts = []): array
     $hdr = ($raw !== false) ? substr($raw, 0, $hsize) : '';
     $body = ($raw !== false) ? substr($raw, $hsize) : '';
 
-    return ['ok' => $errno === 0, 'errno' => $errno, 'error' => $err, 'code' => $code, 'headers' => $hdr, 'body' => $body, 'len' => strlen($body), 'url' => $url, 'method' => $method];
+    $eff   = ($raw !== false) ? (string)curl_getinfo($ch, CURLINFO_EFFECTIVE_URL) : '';
+    $ctype = ($raw !== false) ? (string)curl_getinfo($ch, CURLINFO_CONTENT_TYPE) : '';
+    return [
+        'ok'      => $errno === 0,
+        'errno'   => $errno,
+        'error'   => $err,
+        'code'    => $code,
+        'headers' => $hdr,
+        'body'    => $body,
+        'len'     => strlen($body),
+        'url'     => $url,
+        'method'  => $method,
+        'eff_url' => $eff,
+        'ctype'   => $ctype,
+    ];
 }
 function body_json_success(string $body): bool
 {
@@ -307,7 +353,7 @@ $fromPL = as_pl_date($fromIso ?: $fromIn);
 $toPL = as_pl_date($toIso ?: $toIn);
 
 if (!$fromIso || !$toIso || !$fromPL || !$toPL) {
-    out_json(['status' => 'error', 'where' => 'inputs', 'message' => 'Invalid date format. Use YYYY-MM-DD or DD.MM.YYYY'], 400);
+    fail('inputs', 'Invalid date format. Use YYYY-MM-DD or DD.MM.YYYY');
 }
 
 
@@ -344,14 +390,47 @@ $loginPayload = ['username' => $user, 'password' => $pass, 'service' => URL_SERV
 $login1 = req($ch, 'POST', URL_LOGIN, ['data' => $loginPayload, 'headers' => []]);
 $steps[] = ['step' => 'login_post_1', 'code' => $login1['code'], 'len' => $login1['len']];
 
-$loginBody = $login1['body'];
 if ($login1['code'] >= 300) {
     $login2 = req($ch, 'POST', URL_LOGIN, ['data' => $loginPayload, 'headers' => []]);
     $steps[] = ['step' => 'login_post_2', 'code' => $login2['code'], 'len' => $login2['len']];
-    $loginBody = $login2['body'];
+    $loginRes  = $login2;
+} else {
+    $loginRes  = $login1;
 }
-if (stripos($loginBody, $user) === false && stripos($loginBody, strtoupper($user)) === false) {
-    out_json(['status' => 'error', 'where' => 'login', 'message' => 'Login did not look successful', 'hint' => 'Check credentials / rate limits', 'steps' => $steps], 502);
+
+// Hardened criteria for successful login related with the service host
+$serviceHostTmp = parse_url(URL_SERVICE, PHP_URL_HOST);
+$serviceHost    = is_string($serviceHostTmp) ? $serviceHostTmp : '';
+
+$effUrl     = (string)($loginRes['eff_url'] ?? '');
+$effHostTmp = $effUrl !== '' ? parse_url($effUrl, PHP_URL_HOST) : null;
+$effHost    = is_string($effHostTmp) && $effHostTmp !== '' ? $effHostTmp : null; // ?string
+
+$okByRedirect = ($effHost !== null && $serviceHost !== '') && (strcasecmp($effHost, $serviceHost) === 0);
+$cookieInfo   = has_service_cookie($ch, $cookie);
+$okByCookie   = $cookieInfo['ok'];
+
+// Cookie and host are required for successful login
+if (!$okByRedirect || !$okByCookie) {
+    $steps[] = [
+        'step'            => 'login_check',
+        'eff_url'         => $effUrl,
+        'service_host'    => $serviceHost,
+        'ok_by_redirect'  => $okByRedirect,
+        'ok_by_cookie'    => $okByCookie,
+        'cookie_mem_count' => $cookieInfo['mem_count'] ?? 0,
+        'cookie_file_ok'  => $cookieInfo['file_ok'] ?? false,
+    ];
+    out_json(
+        [
+            'status'  => 'error',
+            'where'   => 'login',
+            'message' => 'Login did not look successful',
+            'hint'    => 'Check credentials / rate limits',
+            'steps'   => $steps
+        ],
+        502
+    );
 }
 
 $sel = req($ch, 'POST', URL_SELECT, ['data' => ['site[client]' => $meter]]);
