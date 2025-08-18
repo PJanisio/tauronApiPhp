@@ -6,7 +6,6 @@
  * Website: https://github.com/PJanisio/tauronApiPhp
  * Receive jSON data from Tauron e-licznik (polish energy distributor)
  * 
- * 
  */
 
 declare(strict_types=1);
@@ -20,25 +19,39 @@ mb_internal_encoding('UTF-8');
  *   user, pass, meter, from, to,
  *   type=consumption|generation,
  *   balanced=0|1 (only used when type is consumption|generation)
- *   format=json, debug=0|1, raw=0|1, save=0|1
+ *   save=0|1
  */
 
-const URL_LOGIN      = 'https://logowanie.tauron-dystrybucja.pl/login';
-const URL_SERVICE    = 'https://elicznik.tauron-dystrybucja.pl';
-const URL_SELECT     = URL_SERVICE . '/ustaw_punkt';
-const URL_ENERGY     = URL_SERVICE . '/energia/api';
-const URL_ENERGY_WO  = URL_SERVICE . '/energia/wo/api';
-const URL_READINGS   = URL_SERVICE . '/odczyty/api';
+const URL_LOGIN = 'https://logowanie.tauron-dystrybucja.pl/login';
+const URL_SERVICE = 'https://elicznik.tauron-dystrybucja.pl';
+const URL_SELECT = URL_SERVICE . '/ustaw_punkt';
+const URL_ENERGY = URL_SERVICE . '/energia/api';
+const URL_ENERGY_WO = URL_SERVICE . '/energia/wo/api';
+const URL_READINGS = URL_SERVICE . '/odczyty/api';
+const ALLOWED_TYPES = ['consumption', 'generation'];
 
 function q(string $k, ?string $d = null): ?string
 {
-    return isset($_GET[$k]) ? trim((string)$_GET[$k]) : $d;
+    return isset($_GET[$k]) ? trim((string) $_GET[$k]) : $d;
 }
+
+function fail(string $where, string $message, int $code = 400, array $extra = []): void
+{
+    out_json(['status' => 'error', 'where' => $where, 'message' => $message] + $extra, $code);
+}
+
 function out_json($data, int $code = 200)
 {
     http_response_code($code);
     header('Content-Type: application/json; charset=utf-8');
-    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+    try {
+        echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+    } catch (Throwable $e) {
+        // throw 500
+        http_response_code(500);
+        echo '{"status":"error","where":"encode","message":"JSON encoding failed"}';
+    }
     exit;
 }
 function as_pl_date(string $in): string
@@ -46,22 +59,19 @@ function as_pl_date(string $in): string
     // accepts YYYY-MM-DD or DD.MM.YYYY -> returns DD.MM.YYYY
     if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $in)) {
         [$y, $m, $d] = explode('-', $in);
-        return sprintf('%02d.%02d.%04d', (int)$d, (int)$m, (int)$y);
+        return sprintf('%02d.%02d.%04d', (int) $d, (int) $m, (int) $y);
     }
-    if (preg_match('/^\d{2}\.\d{2}\.\d{4}$/', $in)) return $in;
+    if (preg_match('/^\d{2}\.\d{2}\.\d{4}$/', $in))
+        return $in;
     return '';
 }
-function date_iter(string $fromIso, string $toIso): Generator
-{
-    $s = new DateTime($fromIso);
-    $e = new DateTime($toIso);
-    for ($d = $s; $d <= $e; $d->modify('+1 day')) yield $d->format('Y-m-d');
-}
+
 function cookie_file(string $user): string
 {
     $hash = hash('sha256', $user . '|' . __FILE__);
     $path = __DIR__ . "/tauron_cookie_$hash.txt";
-    if (!is_file($path)) @file_put_contents($path, '');
+    if (!is_file($path))
+        @file_put_contents($path, '');
     return $path;
 }
 function ch_init(string $cookieFile)
@@ -71,24 +81,24 @@ function ch_init(string $cookieFile)
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS      => 10,
+        CURLOPT_MAXREDIRS => 10,
         CURLOPT_CONNECTTIMEOUT => 15,
-        CURLOPT_TIMEOUT        => 30,
-        CURLOPT_USERAGENT      => $ua,
-        CURLOPT_COOKIEJAR      => $cookieFile,
-        CURLOPT_COOKIEFILE     => $cookieFile,
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_USERAGENT => $ua,
+        CURLOPT_COOKIEJAR => $cookieFile,
+        CURLOPT_COOKIEFILE => $cookieFile,
         CURLOPT_SSL_VERIFYPEER => true,
         CURLOPT_SSL_VERIFYHOST => 2,
-        CURLOPT_HEADER         => true,
+        CURLOPT_HEADER => true,
     ]);
     return $ch;
 }
 function req($ch, string $method, string $url, array $opts = []): array
 {
     $headers = $opts['headers'] ?? [];
-    $data    = $opts['data'] ?? null;
-    $ref     = $opts['referer'] ?? URL_SERVICE . '/';
-    $headers = array_merge(['cache-control: no-cache'], $headers);
+    $data = $opts['data'] ?? null;
+    $ref = $opts['referer'] ?? URL_SERVICE . '/';
+    $headers = array_merge(['cache-control: no-cache', 'accept: application/json'], $headers);
 
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
@@ -100,16 +110,17 @@ function req($ch, string $method, string $url, array $opts = []): array
             curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
             // ensure form content-type if not set
             $hasCt = false;
-            foreach ($headers as $h) if (stripos($h, 'content-type:') === 0) {
-                $hasCt = true;
-                break;
-            }
+            foreach ($headers as $h)
+                if (stripos($h, 'content-type:') === 0) {
+                    $hasCt = true;
+                    break;
+                }
             if (!$hasCt) {
                 $headers[] = 'Content-Type: application/x-www-form-urlencoded';
                 curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
             }
         } else {
-            curl_setopt($ch, CURLOPT_POSTFIELDS, (string)$data);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, (string) $data);
         }
     } else {
         curl_setopt($ch, CURLOPT_POSTFIELDS, null);
@@ -117,11 +128,11 @@ function req($ch, string $method, string $url, array $opts = []): array
 
     $raw = curl_exec($ch);
     $errno = curl_errno($ch);
-    $err   = curl_error($ch);
-    $code  = ($raw !== false) ? (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE) : 0;
-    $hsize = ($raw !== false) ? (int)curl_getinfo($ch, CURLINFO_HEADER_SIZE) : 0;
-    $hdr   = ($raw !== false) ? substr($raw, 0, $hsize) : '';
-    $body  = ($raw !== false) ? substr($raw, $hsize) : '';
+    $err = curl_error($ch);
+    $code = ($raw !== false) ? (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE) : 0;
+    $hsize = ($raw !== false) ? (int) curl_getinfo($ch, CURLINFO_HEADER_SIZE) : 0;
+    $hdr = ($raw !== false) ? substr($raw, 0, $hsize) : '';
+    $body = ($raw !== false) ? substr($raw, $hsize) : '';
 
     return ['ok' => $errno === 0, 'errno' => $errno, 'error' => $err, 'code' => $code, 'headers' => $hdr, 'body' => $body, 'len' => strlen($body), 'url' => $url, 'method' => $method];
 }
@@ -149,32 +160,39 @@ function try_energy_root($ch, string $root, string $fromPL, string $toPL, int $e
     $merge = function (array $json) use (&$sum, &$zones, &$zonesName, &$allData, &$tariff, &$gotAny) {
         $gotAny = true;
         $d = $json['data'] ?? [];
-        $sum += (float)($d['sum'] ?? 0);
-        if (isset($d['zonesName'])) $zonesName = $d['zonesName'];
-        if (isset($d['tariff']))    $tariff = $d['tariff'];
+        $sum += (float) ($d['sum'] ?? 0);
+        if (isset($d['zonesName']))
+            $zonesName = $d['zonesName'];
+        if (isset($d['tariff']))
+            $tariff = $d['tariff'];
         if (isset($d['zones']) && is_array($d['zones'])) {
-            foreach ($d['zones'] as $k => $v) $zones[$k] = ($zones[$k] ?? 0) + (float)$v;
+            foreach ($d['zones'] as $k => $v)
+                $zones[$k] = ($zones[$k] ?? 0) + (float) $v;
         }
         if (isset($d['allData']) && is_array($d['allData'])) {
-            foreach ($d['allData'] as $row) $allData[] = $row;
+            foreach ($d['allData'] as $row)
+                $allData[] = $row;
         }
     };
     $fromIso = DateTime::createFromFormat('d.m.Y', $fromPL)->format('Y-m-d');
-    $toIso   = DateTime::createFromFormat('d.m.Y', $toPL)->format('Y-m-d');
+    $toIso = DateTime::createFromFormat('d.m.Y', $toPL)->format('Y-m-d');
     for ($d = new DateTime($fromIso); $d <= new DateTime($toIso); $d->modify('+1 day')) {
         $pl = $d->format('d.m.Y');
         $p = ['from' => $pl, 'to' => $pl, 'profile' => 'full time', 'type' => $typeKey, 'energy' => $energy];
         $rd = req($ch, 'POST', $root, ['data' => $p]);
         if ($rd['code'] === 200 && body_json_success($rd['body'])) {
             $json = json_decode($rd['body'], true);
-            if (is_array($json)) $merge($json);
+            if (is_array($json))
+                $merge($json);
         }
         usleep(120000);
     }
     if ($gotAny) {
         $out = ['success' => true, 'data' => ['allData' => $allData, 'sum' => $sum, 'zones' => $zones]];
-        if ($zonesName) $out['data']['zonesName'] = $zonesName;
-        if ($tariff)    $out['data']['tariff'] = $tariff;
+        if ($zonesName)
+            $out['data']['zonesName'] = $zonesName;
+        if ($tariff)
+            $out['data']['tariff'] = $tariff;
         return ['ok' => true, 'how' => 'per-day', 'code' => 200, 'body' => json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)];
     }
     return ['ok' => false, 'how' => 'none', 'code' => $r['code'], 'body' => $r['body']];
@@ -190,54 +208,12 @@ function to_json($r)
     return $r ? json_decode($r['body'], true) : null;
 }
 
-/** merge two series into NET (signed) -> old "type=balanced" */
-function synth_signed_net(?array $gen, ?array $con): array
-{
-    $rowsG = [];
-    $rowsC = [];
-    $zonesName = null;
-    $tariff = null;
-    $pull = function (?array $json, array &$dst, ?array &$zonesName, ?string &$tariff) {
-        if (!$json || !isset($json['data']['allData']) || !is_array($json['data']['allData'])) return;
-        if (isset($json['data']['zonesName'])) $zonesName = $json['data']['zonesName'];
-        if (isset($json['data']['tariff']))    $tariff = $json['data']['tariff'];
-        foreach ($json['data']['allData'] as $r) {
-            $d = (string)($r['Date'] ?? '');
-            $h = (string)($r['Hour'] ?? '');
-            $ec = (float)($r['EC'] ?? 0);
-            if ($d === '' || $h === '') continue;
-            $dst[$d . '|' . $h] = ['Date' => $d, 'Hour' => $h, 'EC' => $ec, 'Zone' => $r['Zone'] ?? '1', 'ZoneName' => $r['ZoneName'] ?? 'Cała doba', 'Taryfa' => $r['Taryfa'] ?? ($json['data']['tariff'] ?? 'G11')];
-        }
-    };
-    $pull($gen, $rowsG, $zonesName, $tariff);
-    $pull($con, $rowsC, $zonesName, $tariff);
-
-    $keys = array_unique(array_merge(array_keys($rowsG), array_keys($rowsC)));
-    sort($keys);
-    $outAll = [];
-    $sum = 0.0;
-    $zonesAgg = [];
-    foreach ($keys as $k) {
-        $g = $rowsG[$k]['EC'] ?? 0.0;
-        $c = $rowsC[$k]['EC'] ?? 0.0;
-        $net = $g - $c;
-        $sum += $net;
-        $base = $rowsG[$k] ?? $rowsC[$k] ?? ['Date' => '', 'Hour' => '', 'Zone' => '1', 'ZoneName' => 'Cała doba', 'Taryfa' => $tariff ?? 'G11'];
-        $row = ['EC' => (string)(0 + $net), 'Date' => $base['Date'], 'Hour' => (string)$base['Hour'], 'Status' => '0', 'Extra' => 'N', 'Zone' => $base['Zone'], 'ZoneName' => $base['ZoneName'], 'Taryfa' => $base['Taryfa']];
-        $outAll[] = $row;
-        $z = $row['Zone'];
-        $zonesAgg[$z] = ($zonesAgg[$z] ?? 0) + $net;
-    }
-    $out = ['success' => true, 'data' => ['allData' => $outAll, 'sum' => $sum, 'zones' => $zonesAgg]];
-    if ($zonesName) $out['data']['zonesName'] = $zonesName;
-    if ($tariff)    $out['data']['tariff'] = $tariff;
-    return $out;
-}
-
-/** merge with self-consumption balancing:
+/**
+ * merge with self-consumption balancing:
  *   mode='consumption' -> import = max(cons - gen, 0)
  *   mode='generation'  -> export = max(gen  - cons, 0)
  */
+
 function synth_balanced(?array $primary, ?array $other, string $mode): array
 {
     $rowsP = [];
@@ -245,14 +221,18 @@ function synth_balanced(?array $primary, ?array $other, string $mode): array
     $zonesName = null;
     $tariff = null;
     $pull = function (?array $json, array &$dst, ?array &$zonesName, ?string &$tariff) {
-        if (!$json || !isset($json['data']['allData']) || !is_array($json['data']['allData'])) return;
-        if (isset($json['data']['zonesName'])) $zonesName = $json['data']['zonesName'];
-        if (isset($json['data']['tariff']))    $tariff = $json['data']['tariff'];
+        if (!$json || !isset($json['data']['allData']) || !is_array($json['data']['allData']))
+            return;
+        if (isset($json['data']['zonesName']))
+            $zonesName = $json['data']['zonesName'];
+        if (isset($json['data']['tariff']))
+            $tariff = $json['data']['tariff'];
         foreach ($json['data']['allData'] as $r) {
-            $d = (string)($r['Date'] ?? '');
-            $h = (string)($r['Hour'] ?? '');
-            $ec = (float)($r['EC'] ?? 0);
-            if ($d === '' || $h === '') continue;
+            $d = (string) ($r['Date'] ?? '');
+            $h = (string) ($r['Hour'] ?? '');
+            $ec = (float) ($r['EC'] ?? 0);
+            if ($d === '' || $h === '')
+                continue;
             $dst[$d . '|' . $h] = ['Date' => $d, 'Hour' => $h, 'EC' => $ec, 'Zone' => $r['Zone'] ?? '1', 'ZoneName' => $r['ZoneName'] ?? 'Cała doba', 'Taryfa' => $r['Taryfa'] ?? ($json['data']['tariff'] ?? 'G11')];
         }
     };
@@ -269,15 +249,15 @@ function synth_balanced(?array $primary, ?array $other, string $mode): array
         $o = $rowsO[$k]['EC'] ?? 0.0;
         $net = ($mode === 'consumption') ? max($p - $o, 0.0) : max($p - $o, 0.0); // same formula; p is chosen accordingly
         $base = $rowsP[$k] ?? $rowsO[$k] ?? ['Date' => '', 'Hour' => '', 'Zone' => '1', 'ZoneName' => 'Cała doba', 'Taryfa' => $tariff ?? 'G11'];
-        $row  = [
-            'EC'      => (string)(0 + $net),
-            'Date'    => $base['Date'],
-            'Hour'    => (string)$base['Hour'],
-            'Status'  => '0',
-            'Extra'   => 'N',
-            'Zone'    => $base['Zone'],
+        $row = [
+            'EC' => (string) (0 + $net),
+            'Date' => $base['Date'],
+            'Hour' => (string) $base['Hour'],
+            'Status' => '0',
+            'Extra' => 'N',
+            'Zone' => $base['Zone'],
             'ZoneName' => $base['ZoneName'],
-            'Taryfa'  => $base['Taryfa'],
+            'Taryfa' => $base['Taryfa'],
         ];
         $outAll[] = $row;
         $z = $row['Zone'];
@@ -285,30 +265,32 @@ function synth_balanced(?array $primary, ?array $other, string $mode): array
         $sum += $net;
     }
     $out = ['success' => true, 'data' => ['allData' => $outAll, 'sum' => $sum, 'zones' => $zonesAgg]];
-    if ($zonesName) $out['data']['zonesName'] = $zonesName;
-    if ($tariff)    $out['data']['tariff'] = $tariff;
+    if ($zonesName)
+        $out['data']['zonesName'] = $zonesName;
+    if ($tariff)
+        $out['data']['tariff'] = $tariff;
     return $out;
 }
 
 /* ------------ inputs ------------ */
-$user   = q('user');
+$user = q('user');
 $pass = q('pass');
 $meter = q('meter');
 $fromIn = q('from');
 $toIn = q('to');
-$typeIn = strtolower(q('type', 'consumption') ?? 'consumption'); // consumption|generation|balanced (balanced kept for compat)
-$balIn  = q('balanced', '0');  // "1" enables per-hour self-consumption netting for consumption/generation
-$fmt    = strtolower(q('format', 'json') ?? 'json');
-$debug  = (q('debug', '0') === '1');
-$rawOut = (q('raw', '0') === '1');
+$typeIn = strtolower(q('type', 'consumption') ?? 'consumption'); // consumption|generation
+$balIn = q('balanced', '0');  // "1" enables per-hour self-consumption netting for consumption/generation
+//$fmt = strtolower(q('format', 'json') ?? 'json');
+//$debug = (q('debug', '0') === '1');
+//$rawOut = (q('raw', '0') === '1');
 $balanced = ($balIn === '1');
 
 if (!$user || !$pass || !$meter || !$fromIn || !$toIn) {
-    out_json(['status' => 'error', 'where' => 'inputs', 'message' => 'Missing user, pass, meter, from, to'], 400);
+    fail('inputs', 'Missing user, pass, meter, from, to');
 }
 
 $fromIso = preg_match('/^\d{4}-\d{2}-\d{2}$/', $fromIn) ? $fromIn : '';
-$toIso   = preg_match('/^\d{4}-\d{2}-\d{2}$/', $toIn)   ? $toIn   : '';
+$toIso = preg_match('/^\d{4}-\d{2}-\d{2}$/', $toIn) ? $toIn : '';
 if (!$fromIso) {
     if (preg_match('/^\d{2}\.\d{2}\.\d{4}$/', $fromIn)) {
         [$d, $m, $y] = explode('.', $fromIn);
@@ -318,14 +300,36 @@ if (!$fromIso) {
 if (!$toIso) {
     if (preg_match('/^\d{2}\.\d{2}\.\d{4}$/', $toIn)) {
         [$d, $m, $y] = explode('.', $toIn);
-        $toIso  = sprintf('%04d-%02d-%02d', $y, $m, $d);
+        $toIso = sprintf('%04d-%02d-%02d', $y, $m, $d);
     }
 }
 $fromPL = as_pl_date($fromIso ?: $fromIn);
-$toPL   = as_pl_date($toIso   ?: $toIn);
+$toPL = as_pl_date($toIso ?: $toIn);
 
 if (!$fromIso || !$toIso || !$fromPL || !$toPL) {
     out_json(['status' => 'error', 'where' => 'inputs', 'message' => 'Invalid date format. Use YYYY-MM-DD or DD.MM.YYYY'], 400);
+}
+
+
+// Validate type and balanced switch
+if (!in_array($typeIn, ALLOWED_TYPES, true)) {
+    if ($typeIn === 'balanced') {
+        fail('inputs', "type=balanced is deprecated. Use type=consumption&balanced=1 or type=generation&balanced=1");
+    }
+    fail('inputs', "Invalid type '{$typeIn}'. Allowed: " . implode(',', ALLOWED_TYPES));
+}
+if ($balIn !== '0' && $balIn !== '1') {
+    fail('inputs', "Invalid balanced value '{$balIn}'. Use 0 or 1.");
+}
+// Ensure chronological order
+try {
+    $fromDt = new DateTimeImmutable($fromIso);
+    $toDt = new DateTimeImmutable($toIso);
+    if ($fromDt > $toDt) {
+        fail('inputs', "'from' must be earlier than or equal to 'to'");
+    }
+} catch (Throwable $e) {
+    fail('inputs', 'Invalid date(s) provided');
 }
 
 /* ------------ session/login/select meter ------------ */
@@ -361,87 +365,71 @@ $roots = [URL_ENERGY, URL_ENERGY_WO];
 $result = null;
 $attempts = [];
 
-if ($typeIn === 'balanced') {
-    // legacy signed net (gen - cons)
-    $genR = null;
-    $conR = null;
-    foreach ($roots as $root) {
-        $g = try_energy_root($ch, $root, $fromPL, $toPL, 2, 'oze');
-        $c = try_energy_root($ch, $root, $fromPL, $toPL, 1, 'consum');
-        $attempts[] = ['root' => $root, 'code_gen' => $g['code'], 'how_gen' => $g['how'], 'code_con' => $c['code'], 'how_con' => $c['how']];
-        if (!$genR && $g['ok']) $genR = $g;
-        if (!$conR && $c['ok']) $conR = $c;
-        if ($genR && $conR) break;
+// consumption or generation
+$isGen = ($typeIn === 'generation');
+$energy = $isGen ? 2 : 1;
+$typeKey = $isGen ? 'oze' : 'consum';
+
+// primary fetch
+$primary = null;
+$pickedRoot = null;
+foreach ($roots as $root) {
+    $t = try_energy_root($ch, $root, $fromPL, $toPL, $energy, $typeKey);
+    $attempts[] = ['root' => $root, 'code' => $t['code'], 'how' => $t['how'], 'len' => strlen($t['body'])];
+    if ($t['ok']) {
+        $primary = $t;
+        $pickedRoot = $root;
+        break;
     }
-    if ($genR || $conR) {
-        $balancedJson = synth_signed_net(to_json($genR), to_json($conR));
-        $result = ['ok' => true, 'how' => 'balanced', 'code' => 200, 'body' => json_encode($balancedJson, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)];
+}
+
+if (!$primary) {
+    // fallback to readings (only for non-balanced simple mode)
+    if (!$balanced) {
+        $rd = req($ch, 'POST', URL_READINGS, ['data' => ['from' => $fromPL, 'to' => $toPL, 'type' => ($isGen ? 'energia-oddana' : 'energia-pobrana')]]);
+        $attempts[] = ['root' => URL_READINGS, 'code' => $rd['code'], 'how' => 'readings', 'len' => $rd['len']];
+        if ($rd['code'] === 200 && body_json_success($rd['body'])) {
+            $result = ['ok' => true, 'how' => 'readings', 'code' => 200, 'body' => $rd['body']];
+        }
     }
 } else {
-    // consumption or generation
-    $isGen = ($typeIn === 'generation');
-    $energy = $isGen ? 2 : 1;
-    $typeKey = $isGen ? 'oze' : 'consum';
-
-    // primary fetch
-    $primary = null;
-    $pickedRoot = null;
-    foreach ($roots as $root) {
-        $t = try_energy_root($ch, $root, $fromPL, $toPL, $energy, $typeKey);
-        $attempts[] = ['root' => $root, 'code' => $t['code'], 'how' => $t['how'], 'len' => strlen($t['body'])];
-        if ($t['ok']) {
-            $primary = $t;
-            $pickedRoot = $root;
-            break;
-        }
-    }
-
-    if (!$primary) {
-        // fallback to readings (only for non-balanced simple mode)
-        if (!$balanced) {
-            $rd = req($ch, 'POST', URL_READINGS, ['data' => ['from' => $fromPL, 'to' => $toPL, 'type' => ($isGen ? 'energia-oddana' : 'energia-pobrana')]]);
-            $attempts[] = ['root' => URL_READINGS, 'code' => $rd['code'], 'how' => 'readings', 'len' => $rd['len']];
-            if ($rd['code'] === 200 && body_json_success($rd['body'])) {
-                $result = ['ok' => true, 'how' => 'readings', 'code' => 200, 'body' => $rd['body']];
-            }
-        }
+    if (!$balanced) {
+        // raw series straight through
+        $result = $primary;
     } else {
-        if (!$balanced) {
-            // raw series straight through
-            $result = $primary;
-        } else {
-            // balanced requested: need the opposite series too
-            $otherEnergy = $isGen ? 1 : 2;
-            $otherType   = $isGen ? 'consum' : 'oze';
+        // balanced requested: need the opposite series too
+        $otherEnergy = $isGen ? 1 : 2;
+        $otherType = $isGen ? 'consum' : 'oze';
 
-            // try same root first
-            $other = try_energy_root($ch, $pickedRoot, $fromPL, $toPL, $otherEnergy, $otherType);
-            $attempts[] = ['root' => $pickedRoot, 'code_other' => $other['code'], 'how_other' => $other['how']];
+        // try same root first
+        $other = try_energy_root($ch, $pickedRoot, $fromPL, $toPL, $otherEnergy, $otherType);
+        $attempts[] = ['root' => $pickedRoot, 'code_other' => $other['code'], 'how_other' => $other['how']];
 
-            if (!$other['ok']) {
-                // try alternate root if needed
-                foreach ($roots as $root) {
-                    if ($root === $pickedRoot) continue;
-                    $alt = try_energy_root($ch, $root, $fromPL, $toPL, $otherEnergy, $otherType);
-                    $attempts[] = ['root' => $root, 'code_other' => $alt['code'], 'how_other' => $alt['how']];
-                    if ($alt['ok']) {
-                        $other = $alt;
-                        break;
-                    }
+        if (!$other['ok']) {
+            // try alternate root if needed
+            foreach ($roots as $root) {
+                if ($root === $pickedRoot)
+                    continue;
+                $alt = try_energy_root($ch, $root, $fromPL, $toPL, $otherEnergy, $otherType);
+                $attempts[] = ['root' => $root, 'code_other' => $alt['code'], 'how_other' => $alt['how']];
+                if ($alt['ok']) {
+                    $other = $alt;
+                    break;
                 }
             }
+        }
 
-            if (decode_ok($primary) || decode_ok($other)) {
-                // synth balanced import/export
-                $pJson = to_json($primary);
-                $oJson = to_json($other);
-                $mode  = $isGen ? 'generation' : 'consumption';
-                $balJson = synth_balanced($pJson, $oJson, $mode);
-                $result = ['ok' => true, 'how' => "{$typeIn}_balanced", 'code' => 200, 'body' => json_encode($balJson, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)];
-            }
+        if (decode_ok($primary) || decode_ok($other)) {
+            // synth balanced import/export
+            $pJson = to_json($primary);
+            $oJson = to_json($other);
+            $mode = $isGen ? 'generation' : 'consumption';
+            $balJson = synth_balanced($pJson, $oJson, $mode);
+            $result = ['ok' => true, 'how' => "{$typeIn}_balanced", 'code' => 200, 'body' => json_encode($balJson, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)];
         }
     }
 }
+
 
 /* ------------ output ------------ */
 $save = (q('save', '0') === '1');
@@ -450,23 +438,23 @@ if ($result) {
     // Optional file save in the same directory as index.php
     $responseData = [
         'status' => 'ok',
-        'where'  => 'data',
-        'how'    => $result['how'],
-        'input'  => [
-            'user'     => substr($user, 0, 2) . '***',
-            'meter'    => $meter,
-            'type'     => $typeIn,
+        'where' => 'data',
+        'how' => $result['how'],
+        'input' => [
+            'user' => substr($user, 0, 2) . '***',
+            'meter' => $meter,
+            'type' => $typeIn,
             'balanced' => $balanced ? 1 : 0,
-            'from'     => $fromIso,
-            'to'       => $toIso,
+            'from' => $fromIso,
+            'to' => $toIso,
         ],
         'attempts' => $attempts,
-        'data'     => json_decode($result['body'], true),
+        'data' => json_decode($result['body'], true),
     ];
 
     if ($save) {
         $balTag = $balanced ? 'bal1' : 'bal0';
-        $fname  = sprintf(
+        $fname = sprintf(
             'tauron_%s_%s_%s_%s_%s.json',
             $meter,
             $typeIn,
@@ -487,16 +475,16 @@ if ($result) {
 
 /* No successful result -> return explicit JSON error */
 out_json([
-    'status'   => 'error',
-    'where'    => 'fetch',
-    'message'  => 'No data returned from any root (login ok, meter selected).',
-    'input'    => [
-        'user'     => substr($user, 0, 2) . '***',
-        'meter'    => $meter,
-        'type'     => $typeIn,
+    'status' => 'error',
+    'where' => 'fetch',
+    'message' => 'No data returned from any root (login ok, meter selected).',
+    'input' => [
+        'user' => substr($user, 0, 2) . '***',
+        'meter' => $meter,
+        'type' => $typeIn,
         'balanced' => $balanced ? 1 : 0,
-        'from'     => $fromIso,
-        'to'       => $toIso
+        'from' => $fromIso,
+        'to' => $toIso
     ],
     'attempts' => $attempts
 ], 502);
