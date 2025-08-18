@@ -76,9 +76,10 @@ function cookie_file(string $user): string
 // Check if in cookie file there are any Tauron cookies
 function cookie_has_service_cookie(string $cookieFile): bool
 {
-    if (!is_file($cookieFile) || filesize($cookieFile) === 0) return false;
-    $txt = @file_get_contents($cookieFile);
-    if ($txt === false) 
+    if (!is_file($cookieFile) || filesize($cookieFile) === 0)
+        return false;
+    $txt = file_get_contents($cookieFile);
+    if ($txt === false)
         return false;
     // Netscape cookie format
     return (bool)preg_match('/\belicznik\.tauron-dystrybucja\.pl\b/i', $txt);
@@ -379,9 +380,13 @@ if ($login1['code'] >= 300) {
 }
 
 // Hardened criteria for successful login related with the service host
-$serviceHost = parse_url(URL_SERVICE, PHP_URL_HOST);
-$effHost = $loginRes['eff_url'] ? parse_url($loginRes['eff_url'], PHP_URL_HOST) : null;
-$okByRedirect = $effHost && (strcasecmp($effHost, $serviceHost) === 0);
+$serviceHostTmp = parse_url(URL_SERVICE, PHP_URL_HOST);
+$serviceHost    = is_string($serviceHostTmp) ? $serviceHostTmp : '';
+$effUrl   = (string)($loginRes['eff_url'] ?? '');
+$effHostTmp = $effUrl !== '' ? parse_url($effUrl, PHP_URL_HOST) : null;
+$effHost    = is_string($effHostTmp) && $effHostTmp !== '' ? $effHostTmp : null; // ?string
+
+$okByRedirect = ($effHost !== null && $serviceHost !== '') && (strcasecmp($effHost, $serviceHost) === 0);
 $okByCookie   = cookie_has_service_cookie($cookie);
 if (!$okByRedirect && !$okByCookie) {
     $steps[] = ['step' => 'login_check', 'eff_url' => $loginRes['eff_url'] ?? '', 'service_host' => $serviceHost, 'cookie_has_service' => $okByCookie];
