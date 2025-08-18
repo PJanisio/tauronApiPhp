@@ -73,18 +73,37 @@ function cookie_file(string $user): string
     return $path;
 }
 
-// Check if in cookie file there are any Tauron cookies
-function cookie_has_service_cookie(string $cookieFile): bool
+// Check if in cookie file there are any Tauron cookies first in cURL memory, then in the file
+function has_service_cookie($ch, string $cookieFile): array
 {
-    if (!is_file($cookieFile) || filesize($cookieFile) === 0)
-        return false;
-    $txt = file_get_contents($cookieFile);
-    if ($txt === false)
-        return false;
-    // Netscape cookie format
-    return (bool)preg_match('/\belicznik\.tauron-dystrybucja\.pl\b/i', $txt);
+    $hostRe = '/\belicznik\.tauron-dystrybucja\.pl\b/i';
+    $okMem = false;
+    $memCount = 0;
+    // 1) In-memory cookie jar (niezależne od zapisu do pliku)
+    if (defined('CURLINFO_COOKIELIST')) {
+        $list = @curl_getinfo($ch, CURLINFO_COOKIELIST);
+        if (is_array($list)) {
+            $memCount = count($list);
+            foreach ($list as $line) {
+                if (preg_match($hostRe, (string)$line)) {
+                    $okMem = true;
+                    break;
+                }
+            }
+        }
+    }
+    // Cookie file check
+    $okFile = false;
+    if (!$okMem) {
+        if (is_file($cookieFile) && filesize($cookieFile) > 0) {
+            $txt = @file_get_contents($cookieFile);
+            if ($txt !== false) {
+                $okFile = (bool)preg_match($hostRe, $txt);
+            }
+        }
+    }
+    return ['ok' => ($okMem || $okFile), 'mem_count' => $memCount, 'file_ok' => $okFile];
 }
-
 
 function ch_init(string $cookieFile)
 {
@@ -382,15 +401,36 @@ if ($login1['code'] >= 300) {
 // Hardened criteria for successful login related with the service host
 $serviceHostTmp = parse_url(URL_SERVICE, PHP_URL_HOST);
 $serviceHost    = is_string($serviceHostTmp) ? $serviceHostTmp : '';
-$effUrl   = (string)($loginRes['eff_url'] ?? '');
+
+$effUrl     = (string)($loginRes['eff_url'] ?? '');
 $effHostTmp = $effUrl !== '' ? parse_url($effUrl, PHP_URL_HOST) : null;
 $effHost    = is_string($effHostTmp) && $effHostTmp !== '' ? $effHostTmp : null; // ?string
 
 $okByRedirect = ($effHost !== null && $serviceHost !== '') && (strcasecmp($effHost, $serviceHost) === 0);
-$okByCookie   = cookie_has_service_cookie($cookie);
-if (!$okByRedirect && !$okByCookie) {
-    $steps[] = ['step' => 'login_check', 'eff_url' => $loginRes['eff_url'] ?? '', 'service_host' => $serviceHost, 'cookie_has_service' => $okByCookie];
-    out_json(['status' => 'error', 'where' => 'login', 'message' => 'Login did not look successful', 'hint' => 'Check credentials / rate limits', 'steps' => $steps], 502);
+$cookieInfo   = has_service_cookie($ch, $cookie);
+$okByCookie   = $cookieInfo['ok'];
+
+// Cookie and host are required for successful login
+if (!$okByRedirect || !$okByCookie) {
+    $steps[] = [
+        'step'            => 'login_check',
+        'eff_url'         => $effUrl,
+        'service_host'    => $serviceHost,
+        'ok_by_redirect'  => $okByRedirect,
+        'ok_by_cookie'    => $okByCookie,
+        'cookie_mem_count' => $cookieInfo['mem_count'] ?? 0,
+        'cookie_file_ok'  => $cookieInfo['file_ok'] ?? false,
+    ];
+    out_json(
+        [
+            'status'  => 'error',
+            'where'   => 'login',
+            'message' => 'Login did not look successful',
+            'hint'    => 'Check credentials / rate limits',
+            'steps'   => $steps
+        ],
+        502
+    );
 }
 
 $sel = req($ch, 'POST', URL_SELECT, ['data' => ['site[client]' => $meter]]);
