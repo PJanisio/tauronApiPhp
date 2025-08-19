@@ -16,7 +16,11 @@ mb_internal_encoding('UTF-8');
  * Query:
  *   user, pass, meter, from, to,
  *   type=consumption|generation,
- *   balanced=0|1 (only used when type is consumption|generation)
+ *   balanced=0|1,
+ *   period=range|monthly|yearly|last_12_months,
+ *   month=YYYY-MM (when period=monthly),
+ *   year=YYYY (when period=yearly),
+ *   total_only=0|1,
  *   save=0|1
  */
 
@@ -27,6 +31,7 @@ const URL_ENERGY = URL_SERVICE . '/energia/api';
 const URL_ENERGY_WO = URL_SERVICE . '/energia/wo/api';
 const URL_READINGS = URL_SERVICE . '/odczyty/api';
 const ALLOWED_TYPES = ['consumption', 'generation'];
+const ALLOWED_PERIODS = ['range', 'monthly', 'yearly', 'last_12_months'];
 
 function q(string $k, ?string $d = null): ?string
 {
@@ -62,6 +67,38 @@ function as_pl_date(string $in): string
     if (preg_match('/^\d{2}\.\d{2}\.\d{4}$/', $in))
         return $in;
     return '';
+}
+
+/**
+ * Compute date range for Tauron API based on period and optional month/year.
+ * Returns an array with two elements: [start_date, end_date] in 'YYYY-MM-DD' format.
+ */
+function compute_period_range(string $period, ?string $month, ?string $year): array
+{
+
+    $today = new DateTimeImmutable('today', new DateTimeZone('Europe/Warsaw'));
+    if ($period === 'monthly') {
+        if ($month && preg_match('/^\d{4}-\d{2}$/', $month)) {
+            [$y, $m] = explode('-', $month);
+            $first = new DateTimeImmutable(sprintf('%04d-%02d-01', (int)$y, (int)$m));
+        } else {
+            $first = $today->modify('first day of this month');
+        }
+        $last  = $first->modify('last day of this month');
+        return [$first->format('Y-m-d'), $last->format('Y-m-d')];
+    }
+    if ($period === 'yearly') {
+        $yy = ($year && preg_match('/^\d{4}$/', $year)) ? (int)$year : (int)$today->format('Y');
+        return [sprintf('%04d-01-01', $yy), sprintf('%04d-12-31', $yy)];
+    }
+    if ($period === 'last_12_months') {
+        // From the 1st day of the month 11 months ago to the last day of the current month
+        $start = $today->modify('first day of this month')->modify('-11 months');
+        $end   = $today->modify('last day of this month');
+        return [$start->format('Y-m-d'), $end->format('Y-m-d')];
+    }
+    // 'range' -> keep caller-provided from/to
+    return ['', ''];
 }
 
 function cookie_file(string $user): string
@@ -326,14 +363,33 @@ $fromIn = q('from');
 $toIn = q('to');
 $typeIn = strtolower(q('type', 'consumption') ?? 'consumption'); // consumption|generation
 $balIn = q('balanced', '0');  // "1" enables per-hour self-consumption netting for consumption/generation
-//$fmt = strtolower(q('format', 'json') ?? 'json');
-//$debug = (q('debug', '0') === '1');
-//$rawOut = (q('raw', '0') === '1');
+$period = strtolower(q('period', 'range') ?? 'range'); // range|monthly|yearly|last_12_months
+$monthParam = q('month'); // YYYY-MM (when period=monthly)
+$yearParam  = q('year');  // YYYY (when period=yearly)
+$totalOnly  = (q('total_only', '0') === '1'); // return only one number (sum) + small meta
 $balanced = ($balIn === '1');
 
 if (!$user || !$pass || !$meter || !$fromIn || !$toIn) {
-    fail('inputs', 'Missing user, pass, meter, from, to');
+    // period auto-range can fill from/to, so only enforce when period=range
+    if ($period === 'range') {
+        fail('inputs', 'Missing user, pass, meter, from, to');
+    }
 }
+
+// If period != range, auto-derive from/to
+if (!in_array($period, ALLOWED_PERIODS, true)) {
+    fail('inputs', "Invalid period '{$period}'. Allowed: " . implode(',', ALLOWED_PERIODS));
+}
+if ($period !== 'range') {
+    [$autoFrom, $autoTo] = compute_period_range($period, $monthParam, $yearParam);
+    if ($autoFrom !== '' && $autoTo !== '') {
+        $fromIn = $autoFrom;
+        $toIn   = $autoTo;
+    } else {
+        fail('inputs', 'Unable to compute date range for the requested period');
+    }
+}
+
 
 $fromIso = preg_match('/^\d{4}-\d{2}-\d{2}$/', $fromIn) ? $fromIn : '';
 $toIso = preg_match('/^\d{4}-\d{2}-\d{2}$/', $toIn) ? $toIn : '';
@@ -514,21 +570,60 @@ if (!$primary) {
 $save = (q('save', '0') === '1');
 
 if ($result) {
-    // Optional file save in the same directory as index.php
+    $decoded = json_decode($result['body'], true);
+
+    // Optional compact output for HA monthly/yearly sensors
+    if ($totalOnly) {
+        $sumVal = (float)($decoded['data']['sum'] ?? 0);
+        $minimal = [
+            'status'  => 'ok',
+            'where'   => 'data',
+            'how'     => $result['how'],
+            'period'  => $period,
+            'input'   => [
+                'meter'    => $meter,
+                'type'     => $typeIn,
+                'balanced' => $balanced ? 1 : 0,
+                'from'     => $fromIso,
+                'to'       => $toIso,
+            ],
+            'value'   => $sumVal,
+        ];
+        if ($save) {
+            $balTag = $balanced ? 'bal1' : 'bal0';
+            $fname  = sprintf(
+                'tauron_%s_%s_%s_%s_%s.min.json',
+                $meter,
+                $typeIn,
+                $balTag,
+                str_replace('-', '', $fromIso),
+                str_replace('-', '', $toIso)
+            );
+            @file_put_contents(
+                __DIR__ . DIRECTORY_SEPARATOR . $fname,
+                json_encode($minimal, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+            );
+            $minimal['saved_file'] = $fname;
+        }
+        out_json($minimal);
+    }
+
+    // Full response (default)
     $responseData = [
-        'status' => 'ok',
-        'where' => 'data',
-        'how' => $result['how'],
-        'input' => [
-            'user' => substr($user, 0, 2) . '***',
-            'meter' => $meter,
-            'type' => $typeIn,
+        'status'   => 'ok',
+        'where'    => 'data',
+        'how'      => $result['how'],
+        'period'   => $period,
+        'input'    => [
+            'user'     => substr($user, 0, 2) . '***',
+            'meter'    => $meter,
+            'type'     => $typeIn,
             'balanced' => $balanced ? 1 : 0,
-            'from' => $fromIso,
-            'to' => $toIso,
+            'from'     => $fromIso,
+            'to'       => $toIso,
         ],
         'attempts' => $attempts,
-        'data' => json_decode($result['body'], true),
+        'data'     => $decoded,
     ];
 
     if ($save) {
@@ -542,10 +637,7 @@ if ($result) {
             str_replace('-', '', $toIso)
         );
         $fpath = __DIR__ . DIRECTORY_SEPARATOR . $fname;
-
-        // attempt to save; failure shouldn't block API response
         file_put_contents($fpath, json_encode($responseData, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-        // include filename in response (best-effort)
         $responseData['saved_file'] = $fname;
     }
 
@@ -563,7 +655,8 @@ out_json([
         'type' => $typeIn,
         'balanced' => $balanced ? 1 : 0,
         'from' => $fromIso,
-        'to' => $toIso
+        'to' => $toIso,
+        'period' => $period
     ],
     'attempts' => $attempts
 ], 502);
