@@ -369,27 +369,30 @@ $yearParam  = q('year');  // YYYY (when period=yearly)
 $totalOnly  = (q('total_only', '0') === '1'); // return only one number (sum) + small meta
 $balanced = ($balIn === '1');
 
-if (!$user || !$pass || !$meter || !$fromIn || !$toIn) {
-    // period auto-range can fill from/to, so only enforce when period=range
-    if ($period === 'range') {
-        fail('inputs', 'Missing user, pass, meter, from, to');
-    }
+// Always require auth + meter
+if (!$user || !$pass || !$meter) {
+    fail('inputs', 'Missing user, pass, or meter parameters.');
 }
 
-// If period != range, auto-derive from/to
+// Validate period value early
 if (!in_array($period, ALLOWED_PERIODS, true)) {
     fail('inputs', "Invalid period '{$period}'. Allowed: " . implode(',', ALLOWED_PERIODS));
 }
-if ($period !== 'range') {
-    [$autoFrom, $autoTo] = compute_period_range($period, $monthParam, $yearParam);
-    if ($autoFrom !== '' && $autoTo !== '') {
-        $fromIn = $autoFrom;
-        $toIn   = $autoTo;
-    } else {
-        fail('inputs', 'Unable to compute date range for the requested period');
-    }
-}
 
+// Require from/to only for range; otherwise compute them
+if ($period === 'range') {
+        if (!$fromIn || !$toIn) {
+            fail('inputs', 'Missing "from" and/or "to" parameters for period=range.');
+        }
+    } else {
+        [$autoFrom, $autoTo] = compute_period_range($period, $monthParam, $yearParam);
+        if ($autoFrom !== '' && $autoTo !== '') {
+            $fromIn = $autoFrom;
+            $toIn   = $autoTo;
+        } else {
+            fail('inputs', 'Unable to compute date range for the requested period');
+        }
+    }
 
 $fromIso = preg_match('/^\d{4}-\d{2}-\d{2}$/', $fromIn) ? $fromIn : '';
 $toIso = preg_match('/^\d{4}-\d{2}-\d{2}$/', $toIn) ? $toIn : '';
@@ -581,6 +584,7 @@ if ($result) {
             'how'     => $result['how'],
             'period'  => $period,
             'input'   => [
+                'user'     => substr($user, 0, 2) . '***',
                 'meter'    => $meter,
                 'type'     => $typeIn,
                 'balanced' => $balanced ? 1 : 0,
@@ -599,7 +603,7 @@ if ($result) {
                 str_replace('-', '', $fromIso),
                 str_replace('-', '', $toIso)
             );
-            @file_put_contents(
+            file_put_contents(
                 __DIR__ . DIRECTORY_SEPARATOR . $fname,
                 json_encode($minimal, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
             );
