@@ -18,24 +18,37 @@ Skrypt wykorzystuje mechanizm **PHP sessions** (`session_start()`) do przechowyw
 
 ## Parametry GET
 
-| Parametr   | Wymagany | Opis |
-|------------|----------|------|
-| `user`     | ✔        | login (e-mail do eLicznik) |
-| `pass`     | ✔        | hasło do eLicznik |
-| `meter`    | ✔        | numer punktu poboru (PP) / licznik |
-| `from`     | ✔        | data początkowa (`YYYY-MM-DD` albo `DD.MM.YYYY`) |
-| `to`       | ✔        | data końcowa (`YYYY-MM-DD` albo `DD.MM.YYYY`) |
-| `type`     | ✔        | `consumption` (pobór), `generation` (produkcja PV) |
-| `balanced` | ✖        | `0` = dane surowe (domyślnie), `1` = bilansowanie godzinowe (import/eksport netto) |
-| `save`     | ✖        | `1` = zapis do json w tym samym katalogu co `index.php` |
+| Parametr      | Wymagany                 | Opis |
+|---------------|--------------------------|------|
+| `user`        | ✔                        | login (e-mail do eLicznik) |
+| `pass`        | ✔                        | hasło do eLicznik |
+| `meter`       | ✔                        | numer punktu poboru (PP) / licznik |
+| `type`        | ✔                        | `consumption` (pobór) lub `generation` (produkcja PV) |
+| `balanced`    | ✖                        | `0` = dane surowe (domyślnie), `1` = bilansowanie godzinowe (netto) |
+| `period`      | ✖                        | `range` (domyślnie) \| `monthly` \| `yearly` \| `last_12_months` |
+| `from`        | ✔ gdy `period=range`     | data początkowa (`YYYY-MM-DD` albo `DD.MM.YYYY`) |
+| `to`          | ✔ gdy `period=range`     | data końcowa (`YYYY-MM-DD` albo `DD.MM.YYYY`) |
+| `month`       | ✖ przy `period=monthly`  | `YYYY-MM` (domyślnie: bieżący miesiąc) |
+| `year`        | ✖ przy `period=yearly`   | `YYYY` (domyślnie: bieżący rok) |
+| `total_only`  | ✖                        | `1` = zwróć **jedną** sumaryczną wartość |
+| `save`        | ✖                        | `1` = zapis do pliku JSON  |
 
-## Przykładowy URL
+## Przykładowe zapytania
 
 Pobieranie danych z zakresu 10-15 sierpnia 2025, pobór energi po zbilansowaniu, raport jako json oraz zapis do pliku:
 
 `https://twoja_domena.pl/index.php?user=xxx@gxxxcom&pass=xxxxxxxx&meter=590322xxxxxxxxxx&from=2025-08-10&to=2025-08-15&type=consumption&balanced=1&save=1`
 
-## Wynik
+Miesięcznie – suma za sierpień 2025 (bilansowanie)
+
+`https://twoja_domena.pl/index.php?user=USER&pass=PASS&meter=PP&type=generation&balanced=1&period=yearly&year=2025&total_only=1`
+
+Ostatnie 12 miesięcy - tylko suma (obejmuje bieżący miesiąc)
+
+`https://twoja_domena.pl/index.php?user=USER&pass=PASS&meter=PP&type=consumption&balanced=0&period=last_12_months&total_only=1`
+
+
+## Wynik pełny
 
 ```json
 {
@@ -62,6 +75,25 @@ Pobieranie danych z zakresu 10-15 sierpnia 2025, pobór energi po zbilansowaniu,
       "tariff": "G11"
     }
   }
+}
+```
+
+## Wynik kompaktowy (tylko suma)
+
+```json
+{
+  "status": "ok",
+  "where": "data",
+  "how": "generation_balanced",
+  "period": "yearly",
+  "input": {
+    "meter": "5903...",
+    "type": "generation",
+    "balanced": 1,
+    "from": "2025-01-01",
+    "to": "2025-12-31"
+  },
+  "value": 1234.56
 }
 ```
 
