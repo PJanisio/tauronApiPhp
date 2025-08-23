@@ -8,14 +8,6 @@ Skrypt `index.php` loguje się do serwisu **Tauron eLicznik**, wybiera wskazany 
 - **cURL**
 - Dostęp do zapisu w katalogu, w którym znajduje się `index.php`
 
-## Obsługa sesji
-
-Skrypt wykorzystuje mechanizm **PHP sessions** (`session_start()`) do przechowywania ciasteczek i tokenów CSRF potrzebnych do utrzymania zalogowanego połączenia.  
-
-- Sesja trwa do momentu jej wygaśnięcia na serwerze Taurona (zwykle kilkanaście minut bezczynności).  
-- Przy każdym wywołaniu skryptu wymagane są dane logowania (`user` i `pass`) — ale sesja minimalizuje liczbę dodatkowych żądań podczas pracy.  
-- Jeśli Tauron zmieni zasady logowania, może być konieczne dostosowanie kodu.
-
 ## Parametry GET
 
 | Parametr      | Wymagany                 | Opis |
