@@ -1,4 +1,5 @@
 <?php
+
 /**
  * tauronApiPhp
  * Author: Paweł 'Pavlus' Janisio
@@ -32,8 +33,8 @@ const URL_ENERGY_WO = URL_SERVICE . '/energia/wo/api';
 const URL_READINGS = URL_SERVICE . '/odczyty/api';
 const ALLOWED_TYPES = ['consumption', 'generation'];
 const ALLOWED_PERIODS = ['range', 'monthly', 'yearly', 'last_12_months'];
-const BASE_HEADERS    = ['cache-control: no-cache', 'accept: application/json'];
-const THROTTLE_US     = 120000; 
+const BASE_HEADERS = ['cache-control: no-cache', 'accept: application/json'];
+const THROTTLE_US = 120000;
 
 function q(string $k, ?string $d = null): ?string
 {
@@ -231,64 +232,105 @@ function body_json_success(string $body): bool
 /** try a single /energia/api root with an energy+typeKey pair */
 function try_energy_root($ch, string $root, string $fromPL, string $toPL, int $energy, string $typeKey): array
 {
-    // whole range at once
-    $payload = ['from' => $fromPL, 'to' => $toPL, 'profile' => 'full time', 'type' => $typeKey, 'energy' => $energy];
+    // Try whole range at once
+    $payload = [
+        'from'    => $fromPL,
+        'to'      => $toPL,
+        'profile' => 'full time',
+        'type'    => $typeKey,
+        'energy'  => $energy
+    ];
     $r = req($ch, 'POST', $root, ['data' => $payload]);
+
     if ($r['code'] === 200 && body_json_success($r['body'])) {
-        return ['ok' => true, 'how' => 'range', 'code' => $r['code'], 'body' => $r['body']];
+        return [
+            'ok'   => true,
+            'how'  => 'range',
+            'code' => $r['code'],
+            'body' => $r['body'],
+            'len'  => $r['len'] ?? strlen($r['body']),
+        ];
     }
-    // per-day fallback
-    $sum = 0;
-    $zones = [];
+
+    // Per-day fallback
+    $sum       = 0.0;
+    $zones     = [];
     $zonesName = null;
-    $allData = [];
-    $tariff = null;
-    $gotAny = false;
+    $allData   = [];
+    $tariff    = null;
+    $gotAny    = false;
+
     $merge = function (array $json) use (&$sum, &$zones, &$zonesName, &$allData, &$tariff, &$gotAny) {
         $gotAny = true;
         $d = $json['data'] ?? [];
-        $sum += (float) ($d['sum'] ?? 0);
-        if (isset($d['zonesName']))
-            $zonesName = $d['zonesName'];
-        if (isset($d['tariff']))
-            $tariff = $d['tariff'];
-        if (isset($d['zones']) && is_array($d['zones'])) {
-            foreach ($d['zones'] as $k => $v)
-                $zones[$k] = ($zones[$k] ?? 0) + (float) $v;
+        $sum += (float)($d['sum'] ?? 0);
+        if (isset($d['zonesName'])) $zonesName = $d['zonesName'];
+        if (isset($d['tariff']))    $tariff    = $d['tariff'];
+        if (!empty($d['zones']) && is_array($d['zones'])) {
+            foreach ($d['zones'] as $k => $v) {
+                $zones[$k] = ($zones[$k] ?? 0) + (float)$v;
+            }
         }
-        if (isset($d['allData']) && is_array($d['allData'])) {
-            foreach ($d['allData'] as $row)
+        if (!empty($d['allData']) && is_array($d['allData'])) {
+            foreach ($d['allData'] as $row) {
                 $allData[] = $row;
+            }
         }
     };
+
     $fromDt = DateTime::createFromFormat('d.m.Y', $fromPL);
     $toDt   = DateTime::createFromFormat('d.m.Y', $toPL);
     if (!$fromDt || !$toDt) {
-        return ['ok' => false, 'how' => 'none', 'code' => 400, 'body' => '{"success":false}'];
+        return [
+            'ok'   => false,
+            'how'  => 'none',
+            'code' => 400,
+            'body' => '{"success":false}',
+            'len'  => strlen('{"success":false}'),
+        ];
     }
+
     $fromIso = $fromDt->format('Y-m-d');
     $toIso   = $toDt->format('Y-m-d');
-    $end     = new DateTime($toIso);
+
+    $end = new DateTime($toIso);
     for ($d = new DateTime($fromIso); $d <= $end; $d->modify('+1 day')) {
         $pl = $d->format('d.m.Y');
-        $p = ['from' => $pl, 'to' => $pl, 'profile' => 'full time', 'type' => $typeKey, 'energy' => $energy];
+        $p  = ['from' => $pl, 'to' => $pl, 'profile' => 'full time', 'type' => $typeKey, 'energy' => $energy];
         $rd = req($ch, 'POST', $root, ['data' => $p]);
+
         if ($rd['code'] === 200 && body_json_success($rd['body'])) {
             $json = json_decode($rd['body'], true);
-            if (is_array($json))
-                $merge($json);
+            if (is_array($json)) $merge($json);
         }
-        usleep(THROTTLE_US);
+
+        usleep(defined('THROTTLE_US') ? THROTTLE_US : 120000);
     }
+
     if ($gotAny) {
         $out = ['success' => true, 'data' => ['allData' => $allData, 'sum' => $sum, 'zones' => $zones]];
-        if ($zonesName)
-            $out['data']['zonesName'] = $zonesName;
-        if ($tariff)
-            $out['data']['tariff'] = $tariff;
-        return ['ok' => true, 'how' => 'per-day', 'code' => 200, 'body' => json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)];
+        if ($zonesName) $out['data']['zonesName'] = $zonesName;
+        if ($tariff)    $out['data']['tariff']    = $tariff;
+
+        $bodyOut = json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+        return [
+            'ok'   => true,
+            'how'  => 'per-day',
+            'code' => 200,
+            'body' => $bodyOut,
+            'len'  => strlen($bodyOut),
+        ];
     }
-    return ['ok' => false, 'how' => 'none', 'code' => $r['code'], 'body' => $r['body']];
+
+    // Nothing worked
+    return [
+        'ok'   => false,
+        'how'  => 'none',
+        'code' => $r['code'],
+        'body' => $r['body'],
+        'len'  => $r['len'] ?? strlen($r['body']),
+    ];
 }
 
 /** synth helpers */
@@ -391,18 +433,18 @@ if (!in_array($period, ALLOWED_PERIODS, true)) {
 
 // Require from/to only for range; otherwise compute them
 if ($period === 'range') {
-        if (!$fromIn || !$toIn) {
-            fail('inputs', 'Missing "from" and/or "to" parameters for period=range.');
-        }
-    } else {
-        [$autoFrom, $autoTo] = compute_period_range($period, $monthParam, $yearParam);
-        if ($autoFrom !== '' && $autoTo !== '') {
-            $fromIn = $autoFrom;
-            $toIn   = $autoTo;
-        } else {
-            fail('inputs', 'Unable to compute date range for the requested period');
-        }
+    if (!$fromIn || !$toIn) {
+        fail('inputs', 'Missing "from" and/or "to" parameters for period=range.');
     }
+} else {
+    [$autoFrom, $autoTo] = compute_period_range($period, $monthParam, $yearParam);
+    if ($autoFrom !== '' && $autoTo !== '') {
+        $fromIn = $autoFrom;
+        $toIn   = $autoTo;
+    } else {
+        fail('inputs', 'Unable to compute date range for the requested period');
+    }
+}
 
 $fromIso = preg_match('/^\d{4}-\d{2}-\d{2}$/', $fromIn) ? $fromIn : '';
 $toIso = preg_match('/^\d{4}-\d{2}-\d{2}$/', $toIn) ? $toIn : '';
@@ -551,7 +593,13 @@ if (!$primary) {
 
         // try same root first
         $other = try_energy_root($ch, $pickedRoot, $fromPL, $toPL, $otherEnergy, $otherType);
-        $attempts[] = ['root' => $pickedRoot, 'code_other' => $other['code'], 'how_other' => $other['how']];
+
+        $attempts[] = [
+            'root'       => $pickedRoot,
+            'code_other' => $other['code'],
+            'how_other'  => $other['how'],
+            'len_other'  => $other['len'],
+        ];
 
         if (!$other['ok']) {
             // try alternate root if needed
@@ -559,7 +607,12 @@ if (!$primary) {
                 if ($root === $pickedRoot)
                     continue;
                 $alt = try_energy_root($ch, $root, $fromPL, $toPL, $otherEnergy, $otherType);
-                $attempts[] = ['root' => $root, 'code_other' => $alt['code'], 'how_other' => $alt['how']];
+                $attempts[] = [
+                    'root'       => $root,
+                    'code_other' => $alt['code'],
+                    'how_other'  => $alt['how'],
+                    'len_other'  => $alt['len'],
+                ];
                 if ($alt['ok']) {
                     $other = $alt;
                     break;

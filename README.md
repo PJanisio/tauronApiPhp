@@ -28,8 +28,8 @@ Skrypt wykorzystuje mechanizm **PHP sessions** (`session_start()`) do przechowyw
 | `period`      | ✖                        | `range` (domyślnie) \| `monthly` \| `yearly` \| `last_12_months` |
 | `from`        | ✔ gdy `period=range`     | data początkowa (`YYYY-MM-DD` albo `DD.MM.YYYY`) |
 | `to`          | ✔ gdy `period=range`     | data końcowa (`YYYY-MM-DD` albo `DD.MM.YYYY`) |
-| `month`       | ✖ przy `period=monthly`  | `YYYY-MM` (domyślnie: bieżący miesiąc) |
-| `year`        | ✖ przy `period=yearly`   | `YYYY` (domyślnie: bieżący rok) |
+| `month`       | ✖ gdy `period=monthly`   | `YYYY-MM` (domyślnie: bieżący miesiąc) |
+| `year`        | ✖ gdy `period=yearly`    | `YYYY` (domyślnie: bieżący rok) |
 | `total_only`  | ✖                        | `1` = zwróć **jedną** sumaryczną wartość |
 | `save`        | ✖                        | `1` = zapis do pliku JSON  |
 
@@ -37,16 +37,21 @@ Skrypt wykorzystuje mechanizm **PHP sessions** (`session_start()`) do przechowyw
 
 Pobieranie danych z zakresu 10-15 sierpnia 2025, pobór energi po zbilansowaniu, raport jako json oraz zapis do pliku:
 
-`https://twoja_domena.pl/index.php?user=xxx@gxxxcom&pass=xxxxxxxx&meter=590322xxxxxxxxxx&from=2025-08-10&to=2025-08-15&type=consumption&balanced=1&save=1`
+```json
+https://twoja_domena.pl/index.php?user=xxx@gxxxcom&pass=xxxxxxxx&meter=590322xxxxxxxxxx&from=2025-08-10&to=2025-08-15&type=consumption&balanced=1&save=1
+```
 
 Miesięcznie – suma za sierpień 2025 (bilansowanie)
 
-`https://twoja_domena.pl/index.php?user=USER&pass=PASS&meter=PP&type=generation&balanced=1&period=yearly&year=2025&total_only=1`
+```json
+https://twoja_domena.pl/index.php?user=USER&pass=PASS&meter=PP&type=generation&balanced=1&period=yearly&year=2025&total_only=1
+```
 
 Ostatnie 12 miesięcy - tylko suma (obejmuje bieżący miesiąc)
 
-`https://twoja_domena.pl/index.php?user=USER&pass=PASS&meter=PP&type=consumption&balanced=0&period=last_12_months&total_only=1`
-
+```json
+https://twoja_domena.pl/index.php?user=USER&pass=PASS&meter=PP&type=consumption&balanced=0&period=last_12_months&total_only=1
+```
 
 ## Wynik pełny
 
@@ -105,7 +110,6 @@ Ostatnie 12 miesięcy - tylko suma (obejmuje bieżący miesiąc)
 | **400 Bad Request** | Błąd wejścia: brak wymaganych parametrów, zły format daty, niepoprawny `type` / `balanced` | `inputs` | Przykład: „Invalid date format. Use YYYY-MM-DD or DD.MM.YYYY”. |
 | **500 Internal Server Error** | Awaria kodowania odpowiedzi JSON (rzadkie) | `encode` | W bloku `catch` ustawiany jest kod 500. |
 | **502 Bad Gateway** | Problem po stronie serwisu źródłowego: nieudane logowanie/wybór licznika lub brak danych z endpointów | `login`, `select_meter`, `fetch` | Skrypt korzysta z nieoficjalnych endpointów – ich niedostępność skutkuje 502. |
-
 
 ## Znane ograniczenia
 
