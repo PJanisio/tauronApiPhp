@@ -1,4 +1,5 @@
 <?php
+
 /**
  * tauronApiPhp
  * Author: Paweł 'Pavlus' Janisio
@@ -32,6 +33,8 @@ const URL_ENERGY_WO = URL_SERVICE . '/energia/wo/api';
 const URL_READINGS = URL_SERVICE . '/odczyty/api';
 const ALLOWED_TYPES = ['consumption', 'generation'];
 const ALLOWED_PERIODS = ['range', 'monthly', 'yearly', 'last_12_months'];
+const BASE_HEADERS = ['cache-control: no-cache', 'accept: application/json'];
+const THROTTLE_US = 120000;
 
 function q(string $k, ?string $d = null): ?string
 {
@@ -106,7 +109,7 @@ function cookie_file(string $user): string
     $hash = hash('sha256', $user . '|' . __FILE__);
     $path = __DIR__ . "/tauron_cookie_$hash.txt";
     if (!is_file($path))
-        @file_put_contents($path, '');
+        file_put_contents($path, '');
     return $path;
 }
 
@@ -158,6 +161,8 @@ function ch_init(string $cookieFile)
         CURLOPT_SSL_VERIFYPEER => true,
         CURLOPT_SSL_VERIFYHOST => 2,
         CURLOPT_HEADER => true,
+        CURLOPT_ENCODING => '', // enable gzip/deflate/br if server supports
+        CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_2TLS, // try HTTP/2 over TLS
     ]);
     return $ch;
 }
@@ -167,11 +172,11 @@ function req($ch, string $method, string $url, array $opts = []): array
     $headers = $opts['headers'] ?? [];
     $data = $opts['data'] ?? null;
     $ref = $opts['referer'] ?? URL_SERVICE . '/';
-    $headers = array_merge(['cache-control: no-cache', 'accept: application/json'], $headers);
+    $headers = array_merge(BASE_HEADERS, $headers);
 
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+
     curl_setopt($ch, CURLOPT_REFERER, $ref);
 
     if ($method === 'POST') {
@@ -186,7 +191,6 @@ function req($ch, string $method, string $url, array $opts = []): array
                 }
             if (!$hasCt) {
                 $headers[] = 'Content-Type: application/x-www-form-urlencoded';
-                curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
             }
         } else {
             curl_setopt($ch, CURLOPT_POSTFIELDS, (string) $data);
@@ -194,6 +198,7 @@ function req($ch, string $method, string $url, array $opts = []): array
     } else {
         curl_setopt($ch, CURLOPT_POSTFIELDS, null);
     }
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
 
     $raw = curl_exec($ch);
     $errno = curl_errno($ch);
@@ -221,64 +226,111 @@ function req($ch, string $method, string $url, array $opts = []): array
 }
 function body_json_success(string $body): bool
 {
-    return strpos(ltrim($body), '{"success":true') === 0;
+    return (bool)preg_match('/^\s*\{\s*"success"\s*:\s*true\b/i', $body);
 }
 
 /** try a single /energia/api root with an energy+typeKey pair */
 function try_energy_root($ch, string $root, string $fromPL, string $toPL, int $energy, string $typeKey): array
 {
-    // whole range at once
-    $payload = ['from' => $fromPL, 'to' => $toPL, 'profile' => 'full time', 'type' => $typeKey, 'energy' => $energy];
+    // Try whole range at once
+    $payload = [
+        'from'    => $fromPL,
+        'to'      => $toPL,
+        'profile' => 'full time',
+        'type'    => $typeKey,
+        'energy'  => $energy
+    ];
     $r = req($ch, 'POST', $root, ['data' => $payload]);
+
     if ($r['code'] === 200 && body_json_success($r['body'])) {
-        return ['ok' => true, 'how' => 'range', 'code' => $r['code'], 'body' => $r['body']];
+        return [
+            'ok'   => true,
+            'how'  => 'range',
+            'code' => $r['code'],
+            'body' => $r['body'],
+            'len'  => $r['len'] ?? strlen($r['body']),
+        ];
     }
-    // per-day fallback
-    $sum = 0;
-    $zones = [];
+
+    // Per-day fallback
+    $sum       = 0.0;
+    $zones     = [];
     $zonesName = null;
-    $allData = [];
-    $tariff = null;
-    $gotAny = false;
+    $allData   = [];
+    $tariff    = null;
+    $gotAny    = false;
+
     $merge = function (array $json) use (&$sum, &$zones, &$zonesName, &$allData, &$tariff, &$gotAny) {
         $gotAny = true;
         $d = $json['data'] ?? [];
-        $sum += (float) ($d['sum'] ?? 0);
-        if (isset($d['zonesName']))
-            $zonesName = $d['zonesName'];
-        if (isset($d['tariff']))
-            $tariff = $d['tariff'];
-        if (isset($d['zones']) && is_array($d['zones'])) {
-            foreach ($d['zones'] as $k => $v)
-                $zones[$k] = ($zones[$k] ?? 0) + (float) $v;
+        $sum += (float)($d['sum'] ?? 0);
+        if (isset($d['zonesName'])) $zonesName = $d['zonesName'];
+        if (isset($d['tariff']))    $tariff    = $d['tariff'];
+        if (!empty($d['zones']) && is_array($d['zones'])) {
+            foreach ($d['zones'] as $k => $v) {
+                $zones[$k] = ($zones[$k] ?? 0) + (float)$v;
+            }
         }
-        if (isset($d['allData']) && is_array($d['allData'])) {
-            foreach ($d['allData'] as $row)
+        if (!empty($d['allData']) && is_array($d['allData'])) {
+            foreach ($d['allData'] as $row) {
                 $allData[] = $row;
+            }
         }
     };
-    $fromIso = DateTime::createFromFormat('d.m.Y', $fromPL)->format('Y-m-d');
-    $toIso = DateTime::createFromFormat('d.m.Y', $toPL)->format('Y-m-d');
-    for ($d = new DateTime($fromIso); $d <= new DateTime($toIso); $d->modify('+1 day')) {
+
+    $fromDt = DateTime::createFromFormat('d.m.Y', $fromPL);
+    $toDt   = DateTime::createFromFormat('d.m.Y', $toPL);
+    if (!$fromDt || !$toDt) {
+        return [
+            'ok'   => false,
+            'how'  => 'none',
+            'code' => 400,
+            'body' => '{"success":false}',
+            'len'  => strlen('{"success":false}'),
+        ];
+    }
+
+    $fromIso = $fromDt->format('Y-m-d');
+    $toIso   = $toDt->format('Y-m-d');
+
+    $end = new DateTime($toIso);
+    for ($d = new DateTime($fromIso); $d <= $end; $d->modify('+1 day')) {
         $pl = $d->format('d.m.Y');
-        $p = ['from' => $pl, 'to' => $pl, 'profile' => 'full time', 'type' => $typeKey, 'energy' => $energy];
+        $p  = ['from' => $pl, 'to' => $pl, 'profile' => 'full time', 'type' => $typeKey, 'energy' => $energy];
         $rd = req($ch, 'POST', $root, ['data' => $p]);
+
         if ($rd['code'] === 200 && body_json_success($rd['body'])) {
             $json = json_decode($rd['body'], true);
-            if (is_array($json))
-                $merge($json);
+            if (is_array($json)) $merge($json);
         }
-        usleep(120000);
+
+        usleep(defined('THROTTLE_US') ? THROTTLE_US : 120000);
     }
+
     if ($gotAny) {
         $out = ['success' => true, 'data' => ['allData' => $allData, 'sum' => $sum, 'zones' => $zones]];
-        if ($zonesName)
-            $out['data']['zonesName'] = $zonesName;
-        if ($tariff)
-            $out['data']['tariff'] = $tariff;
-        return ['ok' => true, 'how' => 'per-day', 'code' => 200, 'body' => json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)];
+        if ($zonesName) $out['data']['zonesName'] = $zonesName;
+        if ($tariff)    $out['data']['tariff']    = $tariff;
+
+        $bodyOut = json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+        return [
+            'ok'   => true,
+            'how'  => 'per-day',
+            'code' => 200,
+            'body' => $bodyOut,
+            'len'  => strlen($bodyOut),
+        ];
     }
-    return ['ok' => false, 'how' => 'none', 'code' => $r['code'], 'body' => $r['body']];
+
+    // Nothing worked
+    return [
+        'ok'   => false,
+        'how'  => 'none',
+        'code' => $r['code'],
+        'body' => $r['body'],
+        'len'  => $r['len'] ?? strlen($r['body']),
+    ];
 }
 
 /** synth helpers */
@@ -381,18 +433,18 @@ if (!in_array($period, ALLOWED_PERIODS, true)) {
 
 // Require from/to only for range; otherwise compute them
 if ($period === 'range') {
-        if (!$fromIn || !$toIn) {
-            fail('inputs', 'Missing "from" and/or "to" parameters for period=range.');
-        }
-    } else {
-        [$autoFrom, $autoTo] = compute_period_range($period, $monthParam, $yearParam);
-        if ($autoFrom !== '' && $autoTo !== '') {
-            $fromIn = $autoFrom;
-            $toIn   = $autoTo;
-        } else {
-            fail('inputs', 'Unable to compute date range for the requested period');
-        }
+    if (!$fromIn || !$toIn) {
+        fail('inputs', 'Missing "from" and/or "to" parameters for period=range.');
     }
+} else {
+    [$autoFrom, $autoTo] = compute_period_range($period, $monthParam, $yearParam);
+    if ($autoFrom !== '' && $autoTo !== '') {
+        $fromIn = $autoFrom;
+        $toIn   = $autoTo;
+    } else {
+        fail('inputs', 'Unable to compute date range for the requested period');
+    }
+}
 
 $fromIso = preg_match('/^\d{4}-\d{2}-\d{2}$/', $fromIn) ? $fromIn : '';
 $toIso = preg_match('/^\d{4}-\d{2}-\d{2}$/', $toIn) ? $toIn : '';
@@ -513,7 +565,7 @@ $primary = null;
 $pickedRoot = null;
 foreach ($roots as $root) {
     $t = try_energy_root($ch, $root, $fromPL, $toPL, $energy, $typeKey);
-    $attempts[] = ['root' => $root, 'code' => $t['code'], 'how' => $t['how'], 'len' => strlen($t['body'])];
+    $attempts[] = ['root' => $root, 'code' => $t['code'], 'how' => $t['how'], 'len' => $t['len']];
     if ($t['ok']) {
         $primary = $t;
         $pickedRoot = $root;
@@ -541,7 +593,13 @@ if (!$primary) {
 
         // try same root first
         $other = try_energy_root($ch, $pickedRoot, $fromPL, $toPL, $otherEnergy, $otherType);
-        $attempts[] = ['root' => $pickedRoot, 'code_other' => $other['code'], 'how_other' => $other['how']];
+
+        $attempts[] = [
+            'root'       => $pickedRoot,
+            'code_other' => $other['code'],
+            'how_other'  => $other['how'],
+            'len_other'  => $other['len'],
+        ];
 
         if (!$other['ok']) {
             // try alternate root if needed
@@ -549,7 +607,12 @@ if (!$primary) {
                 if ($root === $pickedRoot)
                     continue;
                 $alt = try_energy_root($ch, $root, $fromPL, $toPL, $otherEnergy, $otherType);
-                $attempts[] = ['root' => $root, 'code_other' => $alt['code'], 'how_other' => $alt['how']];
+                $attempts[] = [
+                    'root'       => $root,
+                    'code_other' => $alt['code'],
+                    'how_other'  => $alt['how'],
+                    'len_other'  => $alt['len'],
+                ];
                 if ($alt['ok']) {
                     $other = $alt;
                     break;
@@ -557,7 +620,7 @@ if (!$primary) {
             }
         }
 
-        if (decode_ok($primary) || decode_ok($other)) {
+        if (decode_ok($primary)) {
             // synth balanced import/export
             $pJson = to_json($primary);
             $oJson = to_json($other);
@@ -605,7 +668,8 @@ if ($result) {
             );
             file_put_contents(
                 __DIR__ . DIRECTORY_SEPARATOR . $fname,
-                json_encode($minimal, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+                json_encode($minimal, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                LOCK_EX
             );
             $minimal['saved_file'] = $fname;
         }
@@ -641,7 +705,7 @@ if ($result) {
             str_replace('-', '', $toIso)
         );
         $fpath = __DIR__ . DIRECTORY_SEPARATOR . $fname;
-        file_put_contents($fpath, json_encode($responseData, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        file_put_contents($fpath, json_encode($responseData, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX);
         $responseData['saved_file'] = $fname;
     }
 
