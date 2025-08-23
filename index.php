@@ -32,6 +32,8 @@ const URL_ENERGY_WO = URL_SERVICE . '/energia/wo/api';
 const URL_READINGS = URL_SERVICE . '/odczyty/api';
 const ALLOWED_TYPES = ['consumption', 'generation'];
 const ALLOWED_PERIODS = ['range', 'monthly', 'yearly', 'last_12_months'];
+const BASE_HEADERS    = ['cache-control: no-cache', 'accept: application/json'];
+const THROTTLE_US     = 120000; 
 
 function q(string $k, ?string $d = null): ?string
 {
@@ -106,7 +108,7 @@ function cookie_file(string $user): string
     $hash = hash('sha256', $user . '|' . __FILE__);
     $path = __DIR__ . "/tauron_cookie_$hash.txt";
     if (!is_file($path))
-        @file_put_contents($path, '');
+        file_put_contents($path, '');
     return $path;
 }
 
@@ -158,6 +160,8 @@ function ch_init(string $cookieFile)
         CURLOPT_SSL_VERIFYPEER => true,
         CURLOPT_SSL_VERIFYHOST => 2,
         CURLOPT_HEADER => true,
+        CURLOPT_ENCODING => '', // enable gzip/deflate/br if server supports
+        CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_2TLS, // try HTTP/2 over TLS
     ]);
     return $ch;
 }
@@ -167,11 +171,11 @@ function req($ch, string $method, string $url, array $opts = []): array
     $headers = $opts['headers'] ?? [];
     $data = $opts['data'] ?? null;
     $ref = $opts['referer'] ?? URL_SERVICE . '/';
-    $headers = array_merge(['cache-control: no-cache', 'accept: application/json'], $headers);
+    $headers = array_merge(BASE_HEADERS, $headers);
 
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+
     curl_setopt($ch, CURLOPT_REFERER, $ref);
 
     if ($method === 'POST') {
@@ -186,7 +190,6 @@ function req($ch, string $method, string $url, array $opts = []): array
                 }
             if (!$hasCt) {
                 $headers[] = 'Content-Type: application/x-www-form-urlencoded';
-                curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
             }
         } else {
             curl_setopt($ch, CURLOPT_POSTFIELDS, (string) $data);
@@ -194,6 +197,7 @@ function req($ch, string $method, string $url, array $opts = []): array
     } else {
         curl_setopt($ch, CURLOPT_POSTFIELDS, null);
     }
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
 
     $raw = curl_exec($ch);
     $errno = curl_errno($ch);
@@ -221,7 +225,7 @@ function req($ch, string $method, string $url, array $opts = []): array
 }
 function body_json_success(string $body): bool
 {
-    return strpos(ltrim($body), '{"success":true') === 0;
+    return (bool)preg_match('/^\s*\{\s*"success"\s*:\s*true\b/i', $body);
 }
 
 /** try a single /energia/api root with an energy+typeKey pair */
@@ -257,9 +261,15 @@ function try_energy_root($ch, string $root, string $fromPL, string $toPL, int $e
                 $allData[] = $row;
         }
     };
-    $fromIso = DateTime::createFromFormat('d.m.Y', $fromPL)->format('Y-m-d');
-    $toIso = DateTime::createFromFormat('d.m.Y', $toPL)->format('Y-m-d');
-    for ($d = new DateTime($fromIso); $d <= new DateTime($toIso); $d->modify('+1 day')) {
+    $fromDt = DateTime::createFromFormat('d.m.Y', $fromPL);
+    $toDt   = DateTime::createFromFormat('d.m.Y', $toPL);
+    if (!$fromDt || !$toDt) {
+        return ['ok' => false, 'how' => 'none', 'code' => 400, 'body' => '{"success":false}'];
+    }
+    $fromIso = $fromDt->format('Y-m-d');
+    $toIso   = $toDt->format('Y-m-d');
+    $end     = new DateTime($toIso);
+    for ($d = new DateTime($fromIso); $d <= $end; $d->modify('+1 day')) {
         $pl = $d->format('d.m.Y');
         $p = ['from' => $pl, 'to' => $pl, 'profile' => 'full time', 'type' => $typeKey, 'energy' => $energy];
         $rd = req($ch, 'POST', $root, ['data' => $p]);
@@ -268,7 +278,7 @@ function try_energy_root($ch, string $root, string $fromPL, string $toPL, int $e
             if (is_array($json))
                 $merge($json);
         }
-        usleep(120000);
+        usleep(THROTTLE_US);
     }
     if ($gotAny) {
         $out = ['success' => true, 'data' => ['allData' => $allData, 'sum' => $sum, 'zones' => $zones]];
@@ -513,7 +523,7 @@ $primary = null;
 $pickedRoot = null;
 foreach ($roots as $root) {
     $t = try_energy_root($ch, $root, $fromPL, $toPL, $energy, $typeKey);
-    $attempts[] = ['root' => $root, 'code' => $t['code'], 'how' => $t['how'], 'len' => strlen($t['body'])];
+    $attempts[] = ['root' => $root, 'code' => $t['code'], 'how' => $t['how'], 'len' => $t['len']];
     if ($t['ok']) {
         $primary = $t;
         $pickedRoot = $root;
@@ -557,7 +567,7 @@ if (!$primary) {
             }
         }
 
-        if (decode_ok($primary) || decode_ok($other)) {
+        if (decode_ok($primary)) {
             // synth balanced import/export
             $pJson = to_json($primary);
             $oJson = to_json($other);
@@ -605,7 +615,8 @@ if ($result) {
             );
             file_put_contents(
                 __DIR__ . DIRECTORY_SEPARATOR . $fname,
-                json_encode($minimal, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+                json_encode($minimal, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                LOCK_EX
             );
             $minimal['saved_file'] = $fname;
         }
@@ -641,7 +652,7 @@ if ($result) {
             str_replace('-', '', $toIso)
         );
         $fpath = __DIR__ . DIRECTORY_SEPARATOR . $fname;
-        file_put_contents($fpath, json_encode($responseData, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        file_put_contents($fpath, json_encode($responseData, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX);
         $responseData['saved_file'] = $fname;
     }
 
