@@ -172,7 +172,7 @@ function cookie_file(string $user): string
  */
 function has_service_cookie($ch, string $cookieFile): array
 {
-    $hostRe = '/\\belicznik\\.tauron-dystrybucja\\.pl\\b/i';
+    $hostRe = '/elicznik\.tauron-dystrybucja\.pl/i';
     $okMem = false;
     $memCount = 0;
     // 1) In-memory cookie jar (niezależne od zapisu do pliku)
@@ -501,7 +501,7 @@ function build_balanced_series(?array $primary, ?array $other, string $mode): ar
         $p = $rowsP[$k]['EC'] ?? 0.0;
         $o = $rowsO[$k]['EC'] ?? 0.0;
         // same formula; $p is chosen accordingly (consumption or generation)
-        $net = ($mode === 'consumption') ? max($p - $o, 0.0) : max($p - $o, 0.0);
+        $net = max($p - $o, 0.0);
         $base = $rowsP[$k] ?? $rowsO[$k] ?? ['Date' => '', 'Hour' => '', 'Zone' => '1', 'ZoneName' => 'Cała doba', 'Taryfa' => $tariff ?? 'G11'];
         $row = [
             'EC' => (string) (0 + $net),
