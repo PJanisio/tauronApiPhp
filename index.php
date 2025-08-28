@@ -36,16 +36,40 @@ const ALLOWED_PERIODS = ['range', 'monthly', 'yearly', 'last_12_months'];
 const BASE_HEADERS = ['cache-control: no-cache', 'accept: application/json'];
 const THROTTLE_US = 120000;
 
-function q(string $k, ?string $d = null): ?string
+/**
+ * Get a trimmed HTTP GET parameter.
+ *
+ * @param string      $k Name of the query parameter.
+ * @param string|null $d Default value returned when the parameter is missing.
+ * @return string|null Trimmed value from $_GET or the provided default.
+ */
+function get_query(string $k, ?string $d = null): ?string
 {
     return isset($_GET[$k]) ? trim((string) $_GET[$k]) : $d;
 }
 
-function fail(string $where, string $message, int $code = 400, array $extra = []): void
+/**
+ * Emit a JSON error response and terminate the script.
+ * Convenience wrapper around out_json().
+ *
+ * @param string $where   Logical subsystem or step name where the failure occurred.
+ * @param string $message Human-readable message.
+ * @param int    $code    HTTP status code (default 400).
+ * @param array  $extra   Extra key-value pairs merged into the JSON payload.
+ * @return void This function never returns (script exits).
+ */
+function json_fail(string $where, string $message, int $code = 400, array $extra = []): void
 {
     out_json(['status' => 'error', 'where' => $where, 'message' => $message] + $extra, $code);
 }
 
+/**
+ * Output data as JSON with an HTTP status code and terminate.
+ *
+ * @param mixed $data Arbitrary data structure to be JSON-encoded.
+ * @param int   $code HTTP status code (default 200).
+ * @return void This function never returns (script exits).
+ */
 function out_json($data, int $code = 200)
 {
     http_response_code($code);
@@ -60,6 +84,16 @@ function out_json($data, int $code = 200)
     }
     exit;
 }
+
+/**
+ * Convert a date to Polish format (DD.MM.YYYY).
+ *
+ * Accepts either ISO format (YYYY-MM-DD) or already Polish format (DD.MM.YYYY).
+ * Returns an empty string when input does not match the expected formats.
+ *
+ * @param string $in Input date string.
+ * @return string Polish-formatted date or empty string on failure.
+ */
 function as_pl_date(string $in): string
 {
     // accepts YYYY-MM-DD or DD.MM.YYYY -> returns DD.MM.YYYY
@@ -73,8 +107,18 @@ function as_pl_date(string $in): string
 }
 
 /**
- * Compute date range for Tauron API based on period and optional month/year.
- * Returns an array with two elements: [start_date, end_date] in 'YYYY-MM-DD' format.
+ * Compute a date range for Tauron API based on a period and optional month/year.
+ *
+ * For:
+ *  - period="monthly": $month may be "YYYY-MM"; defaults to the current month.
+ *  - period="yearly" : $year may be  "YYYY";   defaults to the current year.
+ *  - period="last_12_months": from the first day 11 months ago to the last day of the current month.
+ *  - period="range": caller-provided from/to are used (this function returns ["",""].)
+ *
+ * @param string      $period One of ALLOWED_PERIODS.
+ * @param string|null $month  Optional month (YYYY-MM) when period=monthly.
+ * @param string|null $year   Optional year (YYYY) when period=yearly.
+ * @return array{0:string,1:string} [start_date, end_date] in 'YYYY-MM-DD'; or ["",""] for period=range.
  */
 function compute_period_range(string $period, ?string $month, ?string $year): array
 {
@@ -104,6 +148,12 @@ function compute_period_range(string $period, ?string $month, ?string $year): ar
     return ['', ''];
 }
 
+/**
+ * Build a per-user cookie-jar path and ensure the file exists.
+ *
+ * @param string $user Login/username seed for the cookie file name.
+ * @return string Absolute path to the cookie jar file.
+ */
 function cookie_file(string $user): string
 {
     $hash = hash('sha256', $user . '|' . __FILE__);
@@ -113,7 +163,13 @@ function cookie_file(string $user): string
     return $path;
 }
 
-// Check if in cookie file there are any Tauron cookies first in cURL memory, then in the file
+/**
+ * Check whether a Tauron service cookie is present (in-memory or in file).
+ *
+ * @param resource|\CurlHandle $ch         cURL handle whose in-memory cookie list will be inspected.
+ * @param string                $cookieFile Path to the cookie file persisted on disk.
+ * @return array{ok:bool,mem_count:int,file_ok:bool} Presence flags and in-memory cookie count.
+ */
 function has_service_cookie($ch, string $cookieFile): array
 {
     $hostRe = '/\belicznik\.tauron-dystrybucja\.pl\b/i';
@@ -145,7 +201,13 @@ function has_service_cookie($ch, string $cookieFile): array
     return ['ok' => ($okMem || $okFile), 'mem_count' => $memCount, 'file_ok' => $okFile];
 }
 
-function ch_init(string $cookieFile)
+/**
+ * Initialize a cURL session with sensible defaults for this service.
+ *
+ * @param string $cookieFile Path to the cookie jar file (read+write).
+ * @return resource|\CurlHandle Configured cURL handle.
+ */
+function init_curl(string $cookieFile)
 {
     $ch = curl_init();
     $ua = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari';
@@ -167,7 +229,19 @@ function ch_init(string $cookieFile)
     return $ch;
 }
 
-function req($ch, string $method, string $url, array $opts = []): array
+/**
+ * Perform an HTTP request with cURL.
+ *
+ * @param resource|\CurlHandle $ch     Initialized cURL handle.
+ * @param string               $method HTTP method (e.g., 'GET', 'POST').
+ * @param string               $url    Absolute request URL.
+ * @param array                $opts   Optional options: ['headers'=>string[], 'data'=>array|string|null, 'referer'=>string].
+ * @return array{
+ *   ok:bool, errno:int, error:string, code:int, headers:string, body:string, len:int,
+ *   url:string, method:string, eff_url:string, ctype:string
+ * } Structured response with metadata and raw headers/body.
+ */
+function http_request($ch, string $method, string $url, array $opts = []): array
 {
     $headers = $opts['headers'] ?? [];
     $data = $opts['data'] ?? null;
@@ -224,13 +298,34 @@ function req($ch, string $method, string $url, array $opts = []): array
         'ctype'   => $ctype,
     ];
 }
+
+/**
+ * Quick check whether a response body looks like {"success":true,...}.
+ *
+ * @param string $body Raw JSON response body.
+ * @return bool True if the body begins with a success=true JSON object.
+ */
 function body_json_success(string $body): bool
 {
     return (bool)preg_match('/^\s*\{\s*"success"\s*:\s*true\b/i', $body);
 }
 
-/** try a single /energia/api root with an energy+typeKey pair */
-function try_energy_root($ch, string $root, string $fromPL, string $toPL, int $energy, string $typeKey): array
+/**
+ * Try a single /energia/api root with an energy+typeKey pair.
+ *
+ * Attempts to fetch the whole range first; if that fails, falls back to
+ * day-by-day requests (with throttling), aggregating the totals into
+ * a synthetic response compatible with the "range" format.
+ *
+ * @param resource|\CurlHandle $ch      cURL handle.
+ * @param string               $root    API root URL (URL_ENERGY or URL_ENERGY_WO).
+ * @param string               $fromPL  From date in Polish format (DD.MM.YYYY).
+ * @param string               $toPL    To date in Polish format (DD.MM.YYYY).
+ * @param int                  $energy  1=consumption, 2=generation.
+ * @param string               $typeKey 'consum' or 'oze'.
+ * @return array{ok:bool,how:string,code:int,body:string,len:int} Outcome and payload.
+ */
+function fetch_energy_series($ch, string $root, string $fromPL, string $toPL, int $energy, string $typeKey): array
 {
     // Try whole range at once
     $payload = [
@@ -240,7 +335,7 @@ function try_energy_root($ch, string $root, string $fromPL, string $toPL, int $e
         'type'    => $typeKey,
         'energy'  => $energy
     ];
-    $r = req($ch, 'POST', $root, ['data' => $payload]);
+    $r = http_request($ch, 'POST', $root, ['data' => $payload]);
 
     if ($r['code'] === 200 && body_json_success($r['body'])) {
         return [
@@ -297,7 +392,7 @@ function try_energy_root($ch, string $root, string $fromPL, string $toPL, int $e
     for ($d = new DateTime($fromIso); $d <= $end; $d->modify('+1 day')) {
         $pl = $d->format('d.m.Y');
         $p  = ['from' => $pl, 'to' => $pl, 'profile' => 'full time', 'type' => $typeKey, 'energy' => $energy];
-        $rd = req($ch, 'POST', $root, ['data' => $p]);
+        $rd = http_request($ch, 'POST', $root, ['data' => $p]);
 
         if ($rd['code'] === 200 && body_json_success($rd['body'])) {
             $json = json_decode($rd['body'], true);
@@ -334,22 +429,45 @@ function try_energy_root($ch, string $root, string $fromPL, string $toPL, int $e
 }
 
 /** synth helpers */
-function decode_ok($r)
+
+/**
+ * Check if a response looks successful and JSON has "success":true.
+ *
+ * @param array|null $r Result array from http_request()/fetch_energy_series().
+ * @return bool True when HTTP code==200 and body begins with success=true.
+ */
+function is_success_json($r)
 {
     return $r && $r['code'] === 200 && body_json_success($r['body']);
 }
-function to_json($r)
+
+/**
+ * Decode a JSON body from a result array.
+ *
+ * @param array|null $r Result array with a 'body' JSON string.
+ * @return array|null Decoded associative array, or null on failure.
+ */
+function parse_json_body($r)
 {
     return $r ? json_decode($r['body'], true) : null;
 }
 
 /**
- * merge with self-consumption balancing:
- *   mode='consumption' -> import = max(cons - gen, 0)
- *   mode='generation'  -> export = max(gen  - cons, 0)
+ * Merge two series (primary vs other) into a per-hour, self-consumption-balanced series.
+ *
+ * Balancing rules:
+ *  - mode='consumption' -> import = max(cons - gen, 0)
+ *  - mode='generation'  -> export = max(gen  - cons, 0)
+ *
+ * NOTE: The same formula is used internally with different "primary" assignment;
+ *       $primary should contain the series whose positive remainder you want.
+ *
+ * @param array|null  $primary JSON-decoded response for the primary series.
+ * @param array|null  $other   JSON-decoded response for the other (opposite) series.
+ * @param string      $mode    'consumption'|'generation' (used only for metadata/clarity).
+ * @return array      Synthetic JSON-like array matching the API's shape (success, data=>allData,sum,zones,...).
  */
-
-function synth_balanced(?array $primary, ?array $other, string $mode): array
+function build_balanced_series(?array $primary, ?array $other, string $mode): array
 {
     $rowsP = [];
     $rowsO = [];
@@ -382,7 +500,8 @@ function synth_balanced(?array $primary, ?array $other, string $mode): array
     foreach ($keys as $k) {
         $p = $rowsP[$k]['EC'] ?? 0.0;
         $o = $rowsO[$k]['EC'] ?? 0.0;
-        $net = ($mode === 'consumption') ? max($p - $o, 0.0) : max($p - $o, 0.0); // same formula; p is chosen accordingly
+        // same formula; $p is chosen accordingly (consumption or generation)
+        $net = max($p - $o, 0.0);
         $base = $rowsP[$k] ?? $rowsO[$k] ?? ['Date' => '', 'Hour' => '', 'Zone' => '1', 'ZoneName' => 'Cała doba', 'Taryfa' => $tariff ?? 'G11'];
         $row = [
             'EC' => (string) (0 + $net),
@@ -408,33 +527,33 @@ function synth_balanced(?array $primary, ?array $other, string $mode): array
 }
 
 /* ------------ inputs ------------ */
-$user = q('user');
-$pass = q('pass');
-$meter = q('meter');
-$fromIn = q('from');
-$toIn = q('to');
-$typeIn = strtolower(q('type', 'consumption') ?? 'consumption'); // consumption|generation
-$balIn = q('balanced', '0');  // "1" enables per-hour self-consumption netting for consumption/generation
-$period = strtolower(q('period', 'range') ?? 'range'); // range|monthly|yearly|last_12_months
-$monthParam = q('month'); // YYYY-MM (when period=monthly)
-$yearParam  = q('year');  // YYYY (when period=yearly)
-$totalOnly  = (q('total_only', '0') === '1'); // return only one number (sum) + small meta
+$user = get_query('user');
+$pass = get_query('pass');
+$meter = get_query('meter');
+$fromIn = get_query('from');
+$toIn = get_query('to');
+$typeIn = strtolower(get_query('type', 'consumption') ?? 'consumption'); // consumption|generation
+$balIn = get_query('balanced', '0');  // "1" enables per-hour self-consumption netting for consumption/generation
+$period = strtolower(get_query('period', 'range') ?? 'range'); // range|monthly|yearly|last_12_months
+$monthParam = get_query('month'); // YYYY-MM (when period=monthly)
+$yearParam  = get_query('year');  // YYYY (when period=yearly)
+$totalOnly  = (get_query('total_only', '0') === '1'); // return only one number (sum) + small meta
 $balanced = ($balIn === '1');
 
 // Always require auth + meter
 if (!$user || !$pass || !$meter) {
-    fail('inputs', 'Missing user, pass, or meter parameters.');
+    json_fail('inputs', 'Missing user, pass, or meter parameters.');
 }
 
 // Validate period value early
 if (!in_array($period, ALLOWED_PERIODS, true)) {
-    fail('inputs', "Invalid period '{$period}'. Allowed: " . implode(',', ALLOWED_PERIODS));
+    json_fail('inputs', "Invalid period '{$period}'. Allowed: " . implode(',', ALLOWED_PERIODS));
 }
 
 // Require from/to only for range; otherwise compute them
 if ($period === 'range') {
     if (!$fromIn || !$toIn) {
-        fail('inputs', 'Missing "from" and/or "to" parameters for period=range.');
+        json_fail('inputs', 'Missing "from" and/or "to" parameters for period=range.');
     }
 } else {
     [$autoFrom, $autoTo] = compute_period_range($period, $monthParam, $yearParam);
@@ -442,7 +561,7 @@ if ($period === 'range') {
         $fromIn = $autoFrom;
         $toIn   = $autoTo;
     } else {
-        fail('inputs', 'Unable to compute date range for the requested period');
+        json_fail('inputs', 'Unable to compute date range for the requested period');
     }
 }
 
@@ -464,45 +583,45 @@ $fromPL = as_pl_date($fromIso ?: $fromIn);
 $toPL = as_pl_date($toIso ?: $toIn);
 
 if (!$fromIso || !$toIso || !$fromPL || !$toPL) {
-    fail('inputs', 'Invalid date format. Use YYYY-MM-DD or DD.MM.YYYY');
+    json_fail('inputs', 'Invalid date format. Use YYYY-MM-DD or DD.MM.YYYY');
 }
 
 
 // Validate type and balanced switch
 if (!in_array($typeIn, ALLOWED_TYPES, true)) {
     if ($typeIn === 'balanced') {
-        fail('inputs', "type=balanced is deprecated. Use type=consumption&balanced=1 or type=generation&balanced=1");
+        json_fail('inputs', "type=balanced is deprecated. Use type=consumption&balanced=1 or type=generation&balanced=1");
     }
-    fail('inputs', "Invalid type '{$typeIn}'. Allowed: " . implode(',', ALLOWED_TYPES));
+    json_fail('inputs', "Invalid type '{$typeIn}'. Allowed: " . implode(',', ALLOWED_TYPES));
 }
 if ($balIn !== '0' && $balIn !== '1') {
-    fail('inputs', "Invalid balanced value '{$balIn}'. Use 0 or 1.");
+    json_fail('inputs', "Invalid balanced value '{$balIn}'. Use 0 or 1.");
 }
 // Ensure chronological order
 try {
     $fromDt = new DateTimeImmutable($fromIso);
     $toDt = new DateTimeImmutable($toIso);
     if ($fromDt > $toDt) {
-        fail('inputs', "'from' must be earlier than or equal to 'to'");
+        json_fail('inputs', "'from' must be earlier than or equal to 'to'");
     }
 } catch (Throwable $e) {
-    fail('inputs', 'Invalid date(s) provided');
+    json_fail('inputs', 'Invalid date(s) provided');
 }
 
 /* ------------ session/login/select meter ------------ */
 $cookie = cookie_file($user);
-$ch = ch_init($cookie);
+$ch = init_curl($cookie);
 $steps = [];
 
-$warm = req($ch, 'GET', URL_SERVICE . '/');
+$warm = http_request($ch, 'GET', URL_SERVICE . '/');
 $steps[] = ['step' => 'warm', 'code' => $warm['code'], 'len' => $warm['len']];
 
 $loginPayload = ['username' => $user, 'password' => $pass, 'service' => URL_SERVICE];
-$login1 = req($ch, 'POST', URL_LOGIN, ['data' => $loginPayload, 'headers' => []]);
+$login1 = http_request($ch, 'POST', URL_LOGIN, ['data' => $loginPayload, 'headers' => []]);
 $steps[] = ['step' => 'login_post_1', 'code' => $login1['code'], 'len' => $login1['len']];
 
 if ($login1['code'] >= 300) {
-    $login2 = req($ch, 'POST', URL_LOGIN, ['data' => $loginPayload, 'headers' => []]);
+    $login2 = http_request($ch, 'POST', URL_LOGIN, ['data' => $loginPayload, 'headers' => []]);
     $steps[] = ['step' => 'login_post_2', 'code' => $login2['code'], 'len' => $login2['len']];
     $loginRes  = $login2;
 } else {
@@ -544,7 +663,7 @@ if (!$okByRedirect || !$okByCookie) {
     );
 }
 
-$sel = req($ch, 'POST', URL_SELECT, ['data' => ['site[client]' => $meter]]);
+$sel = http_request($ch, 'POST', URL_SELECT, ['data' => ['site[client]' => $meter]]);
 $steps[] = ['step' => 'select_meter', 'code' => $sel['code'], 'len' => $sel['len']];
 if ($sel['code'] < 200 || $sel['code'] >= 400) {
     out_json(['status' => 'error', 'where' => 'select_meter', 'message' => 'Failed to select meter', 'steps' => $steps], 502);
@@ -564,7 +683,7 @@ $typeKey = $isGen ? 'oze' : 'consum';
 $primary = null;
 $pickedRoot = null;
 foreach ($roots as $root) {
-    $t = try_energy_root($ch, $root, $fromPL, $toPL, $energy, $typeKey);
+    $t = fetch_energy_series($ch, $root, $fromPL, $toPL, $energy, $typeKey);
     $attempts[] = ['root' => $root, 'code' => $t['code'], 'how' => $t['how'], 'len' => $t['len']];
     if ($t['ok']) {
         $primary = $t;
@@ -576,7 +695,7 @@ foreach ($roots as $root) {
 if (!$primary) {
     // fallback to readings (only for non-balanced simple mode)
     if (!$balanced) {
-        $rd = req($ch, 'POST', URL_READINGS, ['data' => ['from' => $fromPL, 'to' => $toPL, 'type' => ($isGen ? 'energia-oddana' : 'energia-pobrana')]]);
+        $rd = http_request($ch, 'POST', URL_READINGS, ['data' => ['from' => $fromPL, 'to' => $toPL, 'type' => ($isGen ? 'energia-oddana' : 'energia-pobrana')]]);
         $attempts[] = ['root' => URL_READINGS, 'code' => $rd['code'], 'how' => 'readings', 'len' => $rd['len']];
         if ($rd['code'] === 200 && body_json_success($rd['body'])) {
             $result = ['ok' => true, 'how' => 'readings', 'code' => 200, 'body' => $rd['body']];
@@ -592,7 +711,7 @@ if (!$primary) {
         $otherType = $isGen ? 'consum' : 'oze';
 
         // try same root first
-        $other = try_energy_root($ch, $pickedRoot, $fromPL, $toPL, $otherEnergy, $otherType);
+        $other = fetch_energy_series($ch, $pickedRoot, $fromPL, $toPL, $otherEnergy, $otherType);
 
         $attempts[] = [
             'root'       => $pickedRoot,
@@ -606,7 +725,7 @@ if (!$primary) {
             foreach ($roots as $root) {
                 if ($root === $pickedRoot)
                     continue;
-                $alt = try_energy_root($ch, $root, $fromPL, $toPL, $otherEnergy, $otherType);
+                $alt = fetch_energy_series($ch, $root, $fromPL, $toPL, $otherEnergy, $otherType);
                 $attempts[] = [
                     'root'       => $root,
                     'code_other' => $alt['code'],
@@ -620,12 +739,12 @@ if (!$primary) {
             }
         }
 
-        if (decode_ok($primary)) {
+        if (is_success_json($primary)) {
             // synth balanced import/export
-            $pJson = to_json($primary);
-            $oJson = to_json($other);
+            $pJson = parse_json_body($primary);
+            $oJson = parse_json_body($other);
             $mode = $isGen ? 'generation' : 'consumption';
-            $balJson = synth_balanced($pJson, $oJson, $mode);
+            $balJson = build_balanced_series($pJson, $oJson, $mode);
             $result = ['ok' => true, 'how' => "{$typeIn}_balanced", 'code' => 200, 'body' => json_encode($balJson, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)];
         }
     }
@@ -633,7 +752,7 @@ if (!$primary) {
 
 
 /* ------------ output ------------ */
-$save = (q('save', '0') === '1');
+$save = (get_query('save', '0') === '1');
 
 if ($result) {
     $decoded = json_decode($result['body'], true);
