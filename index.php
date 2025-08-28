@@ -172,7 +172,7 @@ function cookie_file(string $user): string
  */
 function has_service_cookie($ch, string $cookieFile): array
 {
-    $hostRe = '/elicznik\.tauron-dystrybucja\.pl/i';
+    $hostRe = '/\belicznik\.tauron-dystrybucja\.pl\b/i';
     $okMem = false;
     $memCount = 0;
     // 1) In-memory cookie jar (niezależne od zapisu do pliku)
