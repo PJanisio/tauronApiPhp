@@ -659,14 +659,14 @@ if (!$okByRedirect || !$okByCookie) {
             'hint'    => 'Check credentials / rate limits',
             'steps'   => $steps
         ],
-        502
+        400
     );
 }
 
 $sel = http_request($ch, 'POST', URL_SELECT, ['data' => ['site[client]' => $meter]]);
 $steps[] = ['step' => 'select_meter', 'code' => $sel['code'], 'len' => $sel['len']];
 if ($sel['code'] < 200 || $sel['code'] >= 400) {
-    out_json(['status' => 'error', 'where' => 'select_meter', 'message' => 'Failed to select meter', 'steps' => $steps], 502);
+    out_json(['status' => 'error', 'where' => 'select_meter', 'message' => 'Failed to select meter', 'steps' => $steps], 400);
 }
 
 /* ------------ data fetch ------------ */
