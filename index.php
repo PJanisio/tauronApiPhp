@@ -210,7 +210,8 @@ function has_service_cookie($ch, string $cookieFile): array
 function init_curl(string $cookieFile)
 {
     $ch = curl_init();
-    $ua = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari';
+    // Update User-Agent to a modern signature to prevent WAF blocks
+    $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_FOLLOWLOCATION => true,
@@ -610,66 +611,64 @@ try {
 
 /* ------------ session/login/select meter ------------ */
 $cookie = cookie_file($user);
+
+// Clear old cookies to ensure a fresh login flow
+if (is_file($cookie)) {
+    unlink($cookie);
+}
+
 $ch = init_curl($cookie);
 $steps = [];
 
-$warm = http_request($ch, 'GET', URL_SERVICE . '/');
-$steps[] = ['step' => 'warm', 'code' => $warm['code'], 'len' => $warm['len']];
+// 1. Warmup to establish F5 BIG-IP cookies
+$warmUrl = URL_SERVICE . '/';
+$warm = http_request($ch, 'GET', $warmUrl);
+$steps[] = ['step' => 'warmup_f5', 'code' => $warm['code']];
 
-$loginPayload = ['username' => $user, 'password' => $pass, 'service' => URL_SERVICE];
-$login1 = http_request($ch, 'POST', URL_LOGIN, ['data' => $loginPayload, 'headers' => []]);
-$steps[] = ['step' => 'login_post_1', 'code' => $login1['code'], 'len' => $login1['len']];
+// 2. Initiate Login via Tauron's entry point with service parameter
+$loginEntryUrl = URL_LOGIN . '?service=' . urlencode(URL_SERVICE . '/');
+$loginPageRes = http_request($ch, 'GET', $loginEntryUrl);
+$steps[] = ['step' => 'login_page_get', 'code' => $loginPageRes['code']];
 
-if ($login1['code'] >= 300) {
-    $login2 = http_request($ch, 'POST', URL_LOGIN, ['data' => $loginPayload, 'headers' => []]);
-    $steps[] = ['step' => 'login_post_2', 'code' => $login2['code'], 'len' => $login2['len']];
-    $loginRes  = $login2;
-} else {
-    $loginRes  = $login1;
+// Extract the form action URL specifically looking for kc-form-login
+$formAction = '';
+if (preg_match('/<form[^>]+id="kc-form-login"[^>]+action="([^"]+)"/i', $loginPageRes['body'], $matches)) {
+    // Decode HTML entities (crucial for Keycloak URLs which contain &amp;)
+    $formAction = str_replace('&amp;', '&', $matches[1]);
 }
 
-// Hardened criteria for successful login related with the service host
-$serviceHostTmp = parse_url(URL_SERVICE, PHP_URL_HOST);
-$serviceHost    = is_string($serviceHostTmp) ? $serviceHostTmp : '';
-
-$effUrl     = (string)($loginRes['eff_url'] ?? '');
-$effHostTmp = $effUrl !== '' ? parse_url($effUrl, PHP_URL_HOST) : null;
-$effHost    = is_string($effHostTmp) && $effHostTmp !== '' ? $effHostTmp : null; // ?string
-
-$okByRedirect = ($effHost !== null && $serviceHost !== '') && (strcasecmp($effHost, $serviceHost) === 0);
-$cookieInfo   = has_service_cookie($ch, $cookie);
-$okByCookie   = $cookieInfo['ok'];
-
-// Cookie and host are required for successful login
-if (!$okByRedirect || !$okByCookie) {
-    $steps[] = [
-        'step'            => 'login_check',
-        'eff_url'         => $effUrl,
-        'service_host'    => $serviceHost,
-        'ok_by_redirect'  => $okByRedirect,
-        'ok_by_cookie'    => $okByCookie,
-        'cookie_mem_count' => $cookieInfo['mem_count'] ?? 0,
-        'cookie_file_ok'  => $cookieInfo['file_ok'] ?? false,
-    ];
-    out_json(
-        [
-            'status'  => 'error',
-            'where'   => 'login',
-            'message' => 'Login did not look successful',
-            'hint'    => 'Check credentials / rate limits',
-            'steps'   => $steps
-        ],
-        400
-    );
+if (empty($formAction)) {
+    $steps[] = ['step' => 'login_error', 'message' => 'Keycloak login form action not found'];
+    json_fail('login', 'Authentication form action URL not found.', 400, ['steps' => $steps]);
 }
 
+// 3. Post credentials to Keycloak
+$loginPayload = [
+    'username' => $user,
+    'password' => $pass,
+    'credentialId' => ''
+];
+
+// cURL will naturally follow redirects here and establish the proper elicznik session
+$loginSubmit = http_request($ch, 'POST', $formAction, ['data' => $loginPayload]);
+$steps[] = ['step' => 'login_submit', 'code' => $loginSubmit['code'], 'eff_url' => $loginSubmit['eff_url']];
+
+// Validate login success (if we are still on the login form, credentials failed)
+if (strpos($loginSubmit['body'], 'id="kc-form-login"') !== false) {
+    json_fail('login', 'Invalid credentials or blocked by Keycloak.', 401, ['steps' => $steps]);
+}
+
+// Verify if we landed on the elicznik domain
+if (strpos($loginSubmit['eff_url'], 'elicznik.tauron-dystrybucja.pl') === false) {
+    json_fail('login', 'Failed to reach elicznik after login.', 401, ['steps' => $steps, 'eff_url' => $loginSubmit['eff_url']]);
+}
+
+// 4. Select Meter using established cookies
 $sel = http_request($ch, 'POST', URL_SELECT, ['data' => ['site[client]' => $meter]]);
-$steps[] = ['step' => 'select_meter', 'code' => $sel['code'], 'len' => $sel['len']];
-if ($sel['code'] < 200 || $sel['code'] >= 400) {
-    out_json(['status' => 'error', 'where' => 'select_meter', 'message' => 'Failed to select meter', 'steps' => $steps], 400);
-}
+$steps[] = ['step' => 'select_meter', 'code' => $sel['code']];
 
 /* ------------ data fetch ------------ */
+
 $roots = [URL_ENERGY, URL_ENERGY_WO];
 $result = null;
 $attempts = [];
@@ -846,4 +845,4 @@ out_json([
         'period' => $period
     ],
     'attempts' => $attempts
-], 502);
+], 400);
