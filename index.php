@@ -33,7 +33,15 @@ const URL_ENERGY_WO = URL_SERVICE . '/energia/wo/api';
 const URL_READINGS = URL_SERVICE . '/odczyty/api';
 const ALLOWED_TYPES = ['consumption', 'generation'];
 const ALLOWED_PERIODS = ['range', 'monthly', 'yearly', 'last_12_months'];
-const BASE_HEADERS = ['cache-control: no-cache', 'accept: application/json'];
+const BASE_HEADERS = [
+    'Cache-Control: no-cache',
+    'Accept: application/json, text/javascript, */*; q=0.01',
+    'Accept-Encoding: gzip, deflate, br',
+    'Accept-Language: pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Connection: keep-alive',
+    'Origin: https://elicznik.tauron-dystrybucja.pl',
+    'X-Requested-With: XMLHttpRequest'
+];
 const THROTTLE_US = 120000;
 
 /**
@@ -265,7 +273,8 @@ function http_request($ch, string $method, string $url, array $opts = []): array
                     break;
                 }
             if (!$hasCt) {
-                $headers[] = 'Content-Type: application/x-www-form-urlencoded';
+                // Enforce UTF-8 charset as required by Tauron WAF
+                $headers[] = 'Content-Type: application/x-www-form-urlencoded; charset=UTF-8';
             }
         } else {
             curl_setopt($ch, CURLOPT_POSTFIELDS, (string) $data);
@@ -326,16 +335,18 @@ function body_json_success(string $body): bool
  * @param string               $typeKey 'consum' or 'oze'.
  * @return array{ok:bool,how:string,code:int,body:string,len:int} Outcome and payload.
  */
-function fetch_energy_series($ch, string $root, string $fromPL, string $toPL, int $energy, string $typeKey): array
+function fetch_energy_series($ch, string $root, string $fromIso, string $toIso, int $energy, string $typeKey): array
 {
-    // Try whole range at once
+    // Try whole range at once with ISO dates
     $payload = [
-        'from'    => $fromPL,
-        'to'      => $toPL,
+        'from'    => $fromIso,
+        'to'      => $toIso,
         'profile' => 'full time',
         'type'    => $typeKey,
         'energy'  => $energy
     ];
+    
+    // Headers are automatically merged inside http_request
     $r = http_request($ch, 'POST', $root, ['data' => $payload]);
 
     if ($r['code'] === 200 && body_json_success($r['body'])) {
@@ -374,8 +385,9 @@ function fetch_energy_series($ch, string $root, string $fromPL, string $toPL, in
         }
     };
 
-    $fromDt = DateTime::createFromFormat('d.m.Y', $fromPL);
-    $toDt   = DateTime::createFromFormat('d.m.Y', $toPL);
+    $fromDt = DateTime::createFromFormat('Y-m-d', $fromIso);
+    $toDt   = DateTime::createFromFormat('Y-m-d', $toIso);
+    
     if (!$fromDt || !$toDt) {
         return [
             'ok'   => false,
@@ -386,13 +398,11 @@ function fetch_energy_series($ch, string $root, string $fromPL, string $toPL, in
         ];
     }
 
-    $fromIso = $fromDt->format('Y-m-d');
-    $toIso   = $toDt->format('Y-m-d');
-
     $end = new DateTime($toIso);
     for ($d = new DateTime($fromIso); $d <= $end; $d->modify('+1 day')) {
-        $pl = $d->format('d.m.Y');
-        $p  = ['from' => $pl, 'to' => $pl, 'profile' => 'full time', 'type' => $typeKey, 'energy' => $energy];
+        $iso = $d->format('Y-m-d');
+        $p   = ['from' => $iso, 'to' => $iso, 'profile' => 'full time', 'type' => $typeKey, 'energy' => $energy];
+        
         $rd = http_request($ch, 'POST', $root, ['data' => $p]);
 
         if ($rd['code'] === 200 && body_json_success($rd['body'])) {
@@ -664,7 +674,10 @@ if (strpos($loginSubmit['eff_url'], 'elicznik.tauron-dystrybucja.pl') === false)
 }
 
 // 4. Select Meter using established cookies
-$sel = http_request($ch, 'POST', URL_SELECT, ['data' => ['site[client]' => $meter]]);
+$sel = http_request($ch, 'POST', URL_SELECT, [
+    'data' => ['site[client]' => $meter],
+    'headers' => ['X-Requested-With: XMLHttpRequest']
+]);
 $steps[] = ['step' => 'select_meter', 'code' => $sel['code']];
 
 /* ------------ data fetch ------------ */
@@ -682,7 +695,8 @@ $typeKey = $isGen ? 'oze' : 'consum';
 $primary = null;
 $pickedRoot = null;
 foreach ($roots as $root) {
-    $t = fetch_energy_series($ch, $root, $fromPL, $toPL, $energy, $typeKey);
+    // Replaced $fromPL and $toPL with $fromIso and $toIso
+    $t = fetch_energy_series($ch, $root, $fromIso, $toIso, $energy, $typeKey);
     $attempts[] = ['root' => $root, 'code' => $t['code'], 'how' => $t['how'], 'len' => $t['len']];
     if ($t['ok']) {
         $primary = $t;
@@ -694,7 +708,10 @@ foreach ($roots as $root) {
 if (!$primary) {
     // fallback to readings (only for non-balanced simple mode)
     if (!$balanced) {
-        $rd = http_request($ch, 'POST', URL_READINGS, ['data' => ['from' => $fromPL, 'to' => $toPL, 'type' => ($isGen ? 'energia-oddana' : 'energia-pobrana')]]);
+        $rd = http_request($ch, 'POST', URL_READINGS, [
+            // Use ISO dates instead of PL format
+            'data' => ['from' => $fromIso, 'to' => $toIso, 'type' => ($isGen ? 'energia-oddana' : 'energia-pobrana')]
+        ]);
         $attempts[] = ['root' => URL_READINGS, 'code' => $rd['code'], 'how' => 'readings', 'len' => $rd['len']];
         if ($rd['code'] === 200 && body_json_success($rd['body'])) {
             $result = ['ok' => true, 'how' => 'readings', 'code' => 200, 'body' => $rd['body']];
@@ -710,7 +727,7 @@ if (!$primary) {
         $otherType = $isGen ? 'consum' : 'oze';
 
         // try same root first
-        $other = fetch_energy_series($ch, $pickedRoot, $fromPL, $toPL, $otherEnergy, $otherType);
+        $other = fetch_energy_series($ch, $pickedRoot, $fromIso, $toIso, $otherEnergy, $otherType);
 
         $attempts[] = [
             'root'       => $pickedRoot,
@@ -724,7 +741,7 @@ if (!$primary) {
             foreach ($roots as $root) {
                 if ($root === $pickedRoot)
                     continue;
-                $alt = fetch_energy_series($ch, $root, $fromPL, $toPL, $otherEnergy, $otherType);
+                $alt = fetch_energy_series($ch, $root, $fromIso, $toIso, $otherEnergy, $otherType);
                 $attempts[] = [
                     'root'       => $root,
                     'code_other' => $alt['code'],
@@ -748,7 +765,6 @@ if (!$primary) {
         }
     }
 }
-
 
 /* ------------ output ------------ */
 $save = (get_query('save', '0') === '1');
