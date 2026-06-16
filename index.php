@@ -640,11 +640,13 @@ $loginEntryUrl = URL_LOGIN . '?service=' . urlencode(URL_SERVICE . '/');
 $loginPageRes = http_request($ch, 'GET', $loginEntryUrl);
 $steps[] = ['step' => 'login_page_get', 'code' => $loginPageRes['code']];
 
-// Extract the form action URL specifically looking for kc-form-login
+// Extract the form action URL using a robust two-step regex
 $formAction = '';
-if (preg_match('/<form[^>]+id="kc-form-login"[^>]+action="([^"]+)"/i', $loginPageRes['body'], $matches)) {
-    // Decode HTML entities (crucial for Keycloak URLs which contain &amp;)
-    $formAction = str_replace('&amp;', '&', $matches[1]);
+if (preg_match('/<form\s+[^>]*id\s*=\s*["\']kc-form-login["\'][^>]*>/i', $loginPageRes['body'], $formMatches)) {
+    if (preg_match('/action\s*=\s*["\']([^"\']+)["\']/i', $formMatches[0], $actionMatches)) {
+        // Decode HTML entities safely handling quotes
+        $formAction = htmlspecialchars_decode($actionMatches[1], ENT_QUOTES | ENT_HTML5);
+    }
 }
 
 if (empty($formAction)) {
@@ -679,6 +681,11 @@ $sel = http_request($ch, 'POST', URL_SELECT, [
     'headers' => ['X-Requested-With: XMLHttpRequest']
 ]);
 $steps[] = ['step' => 'select_meter', 'code' => $sel['code']];
+
+// Early exit if meter selection fails
+if ($sel['code'] < 200 || $sel['code'] >= 400) {
+    json_fail('select_meter', 'Failed to select meter.', 400, ['steps' => $steps]);
+}
 
 /* ------------ data fetch ------------ */
 
