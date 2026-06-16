@@ -33,7 +33,15 @@ const URL_ENERGY_WO = URL_SERVICE . '/energia/wo/api';
 const URL_READINGS = URL_SERVICE . '/odczyty/api';
 const ALLOWED_TYPES = ['consumption', 'generation'];
 const ALLOWED_PERIODS = ['range', 'monthly', 'yearly', 'last_12_months'];
-const BASE_HEADERS = ['cache-control: no-cache', 'accept: application/json'];
+const BASE_HEADERS = [
+    'Cache-Control: no-cache',
+    'Accept: application/json, text/javascript, */*; q=0.01',
+    'Accept-Encoding: gzip, deflate, br',
+    'Accept-Language: pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Connection: keep-alive',
+    'Origin: https://elicznik.tauron-dystrybucja.pl',
+    'X-Requested-With: XMLHttpRequest'
+];
 const THROTTLE_US = 120000;
 
 /**
@@ -210,7 +218,8 @@ function has_service_cookie($ch, string $cookieFile): array
 function init_curl(string $cookieFile)
 {
     $ch = curl_init();
-    $ua = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari';
+    // Update User-Agent to a modern signature to prevent WAF blocks
+    $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_FOLLOWLOCATION => true,
@@ -264,7 +273,8 @@ function http_request($ch, string $method, string $url, array $opts = []): array
                     break;
                 }
             if (!$hasCt) {
-                $headers[] = 'Content-Type: application/x-www-form-urlencoded';
+                // Enforce UTF-8 charset as required by Tauron WAF
+                $headers[] = 'Content-Type: application/x-www-form-urlencoded; charset=UTF-8';
             }
         } else {
             curl_setopt($ch, CURLOPT_POSTFIELDS, (string) $data);
@@ -325,16 +335,18 @@ function body_json_success(string $body): bool
  * @param string               $typeKey 'consum' or 'oze'.
  * @return array{ok:bool,how:string,code:int,body:string,len:int} Outcome and payload.
  */
-function fetch_energy_series($ch, string $root, string $fromPL, string $toPL, int $energy, string $typeKey): array
+function fetch_energy_series($ch, string $root, string $fromIso, string $toIso, int $energy, string $typeKey): array
 {
-    // Try whole range at once
+    // Try whole range at once with ISO dates
     $payload = [
-        'from'    => $fromPL,
-        'to'      => $toPL,
+        'from'    => $fromIso,
+        'to'      => $toIso,
         'profile' => 'full time',
         'type'    => $typeKey,
         'energy'  => $energy
     ];
+    
+    // Headers are automatically merged inside http_request
     $r = http_request($ch, 'POST', $root, ['data' => $payload]);
 
     if ($r['code'] === 200 && body_json_success($r['body'])) {
@@ -373,8 +385,9 @@ function fetch_energy_series($ch, string $root, string $fromPL, string $toPL, in
         }
     };
 
-    $fromDt = DateTime::createFromFormat('d.m.Y', $fromPL);
-    $toDt   = DateTime::createFromFormat('d.m.Y', $toPL);
+    $fromDt = DateTime::createFromFormat('Y-m-d', $fromIso);
+    $toDt   = DateTime::createFromFormat('Y-m-d', $toIso);
+    
     if (!$fromDt || !$toDt) {
         return [
             'ok'   => false,
@@ -385,13 +398,11 @@ function fetch_energy_series($ch, string $root, string $fromPL, string $toPL, in
         ];
     }
 
-    $fromIso = $fromDt->format('Y-m-d');
-    $toIso   = $toDt->format('Y-m-d');
-
     $end = new DateTime($toIso);
     for ($d = new DateTime($fromIso); $d <= $end; $d->modify('+1 day')) {
-        $pl = $d->format('d.m.Y');
-        $p  = ['from' => $pl, 'to' => $pl, 'profile' => 'full time', 'type' => $typeKey, 'energy' => $energy];
+        $iso = $d->format('Y-m-d');
+        $p   = ['from' => $iso, 'to' => $iso, 'profile' => 'full time', 'type' => $typeKey, 'energy' => $energy];
+        
         $rd = http_request($ch, 'POST', $root, ['data' => $p]);
 
         if ($rd['code'] === 200 && body_json_success($rd['body'])) {
@@ -610,66 +621,74 @@ try {
 
 /* ------------ session/login/select meter ------------ */
 $cookie = cookie_file($user);
+
+// Clear old cookies to ensure a fresh login flow
+if (is_file($cookie)) {
+    unlink($cookie);
+}
+
 $ch = init_curl($cookie);
 $steps = [];
 
-$warm = http_request($ch, 'GET', URL_SERVICE . '/');
-$steps[] = ['step' => 'warm', 'code' => $warm['code'], 'len' => $warm['len']];
+// 1. Warmup to establish F5 BIG-IP cookies
+$warmUrl = URL_SERVICE . '/';
+$warm = http_request($ch, 'GET', $warmUrl);
+$steps[] = ['step' => 'warmup_f5', 'code' => $warm['code']];
 
-$loginPayload = ['username' => $user, 'password' => $pass, 'service' => URL_SERVICE];
-$login1 = http_request($ch, 'POST', URL_LOGIN, ['data' => $loginPayload, 'headers' => []]);
-$steps[] = ['step' => 'login_post_1', 'code' => $login1['code'], 'len' => $login1['len']];
+// 2. Initiate Login via Tauron's entry point with service parameter
+$loginEntryUrl = URL_LOGIN . '?service=' . urlencode(URL_SERVICE . '/');
+$loginPageRes = http_request($ch, 'GET', $loginEntryUrl);
+$steps[] = ['step' => 'login_page_get', 'code' => $loginPageRes['code']];
 
-if ($login1['code'] >= 300) {
-    $login2 = http_request($ch, 'POST', URL_LOGIN, ['data' => $loginPayload, 'headers' => []]);
-    $steps[] = ['step' => 'login_post_2', 'code' => $login2['code'], 'len' => $login2['len']];
-    $loginRes  = $login2;
-} else {
-    $loginRes  = $login1;
+// Extract the form action URL using a robust two-step regex
+$formAction = '';
+if (preg_match('/<form\s+[^>]*id\s*=\s*["\']kc-form-login["\'][^>]*>/i', $loginPageRes['body'], $formMatches)) {
+    if (preg_match('/action\s*=\s*["\']([^"\']+)["\']/i', $formMatches[0], $actionMatches)) {
+        // Decode HTML entities safely handling quotes
+        $formAction = htmlspecialchars_decode($actionMatches[1], ENT_QUOTES | ENT_HTML5);
+    }
 }
 
-// Hardened criteria for successful login related with the service host
-$serviceHostTmp = parse_url(URL_SERVICE, PHP_URL_HOST);
-$serviceHost    = is_string($serviceHostTmp) ? $serviceHostTmp : '';
-
-$effUrl     = (string)($loginRes['eff_url'] ?? '');
-$effHostTmp = $effUrl !== '' ? parse_url($effUrl, PHP_URL_HOST) : null;
-$effHost    = is_string($effHostTmp) && $effHostTmp !== '' ? $effHostTmp : null; // ?string
-
-$okByRedirect = ($effHost !== null && $serviceHost !== '') && (strcasecmp($effHost, $serviceHost) === 0);
-$cookieInfo   = has_service_cookie($ch, $cookie);
-$okByCookie   = $cookieInfo['ok'];
-
-// Cookie and host are required for successful login
-if (!$okByRedirect || !$okByCookie) {
-    $steps[] = [
-        'step'            => 'login_check',
-        'eff_url'         => $effUrl,
-        'service_host'    => $serviceHost,
-        'ok_by_redirect'  => $okByRedirect,
-        'ok_by_cookie'    => $okByCookie,
-        'cookie_mem_count' => $cookieInfo['mem_count'] ?? 0,
-        'cookie_file_ok'  => $cookieInfo['file_ok'] ?? false,
-    ];
-    out_json(
-        [
-            'status'  => 'error',
-            'where'   => 'login',
-            'message' => 'Login did not look successful',
-            'hint'    => 'Check credentials / rate limits',
-            'steps'   => $steps
-        ],
-        400
-    );
+if (empty($formAction)) {
+    $steps[] = ['step' => 'login_error', 'message' => 'Keycloak login form action not found'];
+    json_fail('login', 'Authentication form action URL not found.', 400, ['steps' => $steps]);
 }
 
-$sel = http_request($ch, 'POST', URL_SELECT, ['data' => ['site[client]' => $meter]]);
-$steps[] = ['step' => 'select_meter', 'code' => $sel['code'], 'len' => $sel['len']];
+// 3. Post credentials to Keycloak
+$loginPayload = [
+    'username' => $user,
+    'password' => $pass,
+    'credentialId' => ''
+];
+
+// cURL will naturally follow redirects here and establish the proper elicznik session
+$loginSubmit = http_request($ch, 'POST', $formAction, ['data' => $loginPayload]);
+$steps[] = ['step' => 'login_submit', 'code' => $loginSubmit['code'], 'eff_url' => $loginSubmit['eff_url']];
+
+// Validate login success (if we are still on the login form, credentials failed)
+if (strpos($loginSubmit['body'], 'id="kc-form-login"') !== false) {
+    json_fail('login', 'Invalid credentials or blocked by Keycloak.', 401, ['steps' => $steps]);
+}
+
+// Verify if we landed on the elicznik domain
+if (strpos($loginSubmit['eff_url'], 'elicznik.tauron-dystrybucja.pl') === false) {
+    json_fail('login', 'Failed to reach elicznik after login.', 401, ['steps' => $steps, 'eff_url' => $loginSubmit['eff_url']]);
+}
+
+// 4. Select Meter using established cookies
+$sel = http_request($ch, 'POST', URL_SELECT, [
+    'data' => ['site[client]' => $meter],
+    'headers' => ['X-Requested-With: XMLHttpRequest']
+]);
+$steps[] = ['step' => 'select_meter', 'code' => $sel['code']];
+
+// Early exit if meter selection fails
 if ($sel['code'] < 200 || $sel['code'] >= 400) {
-    out_json(['status' => 'error', 'where' => 'select_meter', 'message' => 'Failed to select meter', 'steps' => $steps], 400);
+    json_fail('select_meter', 'Failed to select meter.', 400, ['steps' => $steps]);
 }
 
 /* ------------ data fetch ------------ */
+
 $roots = [URL_ENERGY, URL_ENERGY_WO];
 $result = null;
 $attempts = [];
@@ -683,7 +702,8 @@ $typeKey = $isGen ? 'oze' : 'consum';
 $primary = null;
 $pickedRoot = null;
 foreach ($roots as $root) {
-    $t = fetch_energy_series($ch, $root, $fromPL, $toPL, $energy, $typeKey);
+    // Replaced $fromPL and $toPL with $fromIso and $toIso
+    $t = fetch_energy_series($ch, $root, $fromIso, $toIso, $energy, $typeKey);
     $attempts[] = ['root' => $root, 'code' => $t['code'], 'how' => $t['how'], 'len' => $t['len']];
     if ($t['ok']) {
         $primary = $t;
@@ -695,7 +715,10 @@ foreach ($roots as $root) {
 if (!$primary) {
     // fallback to readings (only for non-balanced simple mode)
     if (!$balanced) {
-        $rd = http_request($ch, 'POST', URL_READINGS, ['data' => ['from' => $fromPL, 'to' => $toPL, 'type' => ($isGen ? 'energia-oddana' : 'energia-pobrana')]]);
+        $rd = http_request($ch, 'POST', URL_READINGS, [
+            // Use ISO dates instead of PL format
+            'data' => ['from' => $fromIso, 'to' => $toIso, 'type' => ($isGen ? 'energia-oddana' : 'energia-pobrana')]
+        ]);
         $attempts[] = ['root' => URL_READINGS, 'code' => $rd['code'], 'how' => 'readings', 'len' => $rd['len']];
         if ($rd['code'] === 200 && body_json_success($rd['body'])) {
             $result = ['ok' => true, 'how' => 'readings', 'code' => 200, 'body' => $rd['body']];
@@ -711,7 +734,7 @@ if (!$primary) {
         $otherType = $isGen ? 'consum' : 'oze';
 
         // try same root first
-        $other = fetch_energy_series($ch, $pickedRoot, $fromPL, $toPL, $otherEnergy, $otherType);
+        $other = fetch_energy_series($ch, $pickedRoot, $fromIso, $toIso, $otherEnergy, $otherType);
 
         $attempts[] = [
             'root'       => $pickedRoot,
@@ -725,7 +748,7 @@ if (!$primary) {
             foreach ($roots as $root) {
                 if ($root === $pickedRoot)
                     continue;
-                $alt = fetch_energy_series($ch, $root, $fromPL, $toPL, $otherEnergy, $otherType);
+                $alt = fetch_energy_series($ch, $root, $fromIso, $toIso, $otherEnergy, $otherType);
                 $attempts[] = [
                     'root'       => $root,
                     'code_other' => $alt['code'],
@@ -749,7 +772,6 @@ if (!$primary) {
         }
     }
 }
-
 
 /* ------------ output ------------ */
 $save = (get_query('save', '0') === '1');
@@ -846,4 +868,4 @@ out_json([
         'period' => $period
     ],
     'attempts' => $attempts
-], 502);
+], 400);
